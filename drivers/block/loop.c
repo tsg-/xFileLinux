@@ -378,7 +378,7 @@ static int lo_rw_aio(struct loop_device *lo, struct loop_cmd *cmd,
 		 * 'bvec' because of bio splitting, so offset from the bvec
 		 * must be passed to iov iterator
 		 */
-		offset = bio->bi_iter.bi_bvec_done;
+		offset = bio->bi_iter.bi_offset;
 		bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
 	}
 	atomic_set(&cmd->ref, 2);

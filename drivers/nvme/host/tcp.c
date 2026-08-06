@@ -363,7 +363,7 @@ static void nvme_tcp_init_iter(struct nvme_tcp_request *req,
 			nr_bvec++;
 		}
 		size = bio->bi_iter.bi_size;
-		offset = bio->bi_iter.bi_bvec_done;
+		offset = bio->bi_iter.bi_offset;
 	}
 
 	iov_iter_bvec(&req->iter, dir, vec, nr_bvec, size);

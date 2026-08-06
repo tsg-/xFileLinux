@@ -110,7 +110,7 @@ struct bvec_iter {
 	/*
 	 * Current offset in the bvec entry pointed to by `bi_idx`.
 	 */
-	unsigned int		bi_bvec_done;
+	unsigned int		bi_offset;
 } __packed __aligned(4);
 
 struct bvec_iter_all {
@@ -131,10 +131,10 @@ struct bvec_iter_all {
 
 #define mp_bvec_iter_len(bvec, iter)				\
 	min((iter).bi_size,					\
-	    __bvec_iter_bvec((bvec), (iter))->bv_len - (iter).bi_bvec_done)
+	    __bvec_iter_bvec((bvec), (iter))->bv_len - (iter).bi_offset)
 
 #define mp_bvec_iter_offset(bvec, iter)				\
-	(__bvec_iter_bvec((bvec), (iter))->bv_offset + (iter).bi_bvec_done)
+	(__bvec_iter_bvec((bvec), (iter))->bv_offset + (iter).bi_offset)
 
 #define mp_bvec_iter_page_idx(bvec, iter)			\
 	(mp_bvec_iter_offset((bvec), (iter)) / PAGE_SIZE)
@@ -177,7 +177,7 @@ static inline bool bvec_iter_advance(const struct bio_vec *bv,
 	}
 
 	iter->bi_size -= bytes;
-	bytes += iter->bi_bvec_done;
+	bytes += iter->bi_offset;
 
 	while (bytes && bytes >= bv[idx].bv_len) {
 		bytes -= bv[idx].bv_len;
@@ -185,7 +185,7 @@ static inline bool bvec_iter_advance(const struct bio_vec *bv,
 	}
 
 	iter->bi_idx = idx;
-	iter->bi_bvec_done = bytes;
+	iter->bi_offset = bytes;
 	return true;
 }
 
@@ -196,13 +196,13 @@ static inline bool bvec_iter_advance(const struct bio_vec *bv,
 static inline void bvec_iter_advance_single(const struct bio_vec *bv,
 				struct bvec_iter *iter, unsigned int bytes)
 {
-	unsigned int done = iter->bi_bvec_done + bytes;
+	unsigned int done = iter->bi_offset + bytes;
 
 	if (done == bv[iter->bi_idx].bv_len) {
 		done = 0;
 		iter->bi_idx++;
 	}
-	iter->bi_bvec_done = done;
+	iter->bi_offset = done;
 	iter->bi_size -= bytes;
 }
 
@@ -224,7 +224,7 @@ static inline void bvec_iter_advance_single(const struct bio_vec *bv,
 	.bi_sector	= 0,						\
 	.bi_size	= UINT_MAX,					\
 	.bi_idx		= 0,						\
-	.bi_bvec_done	= 0,						\
+	.bi_offset	= 0,						\
 }
 
 static inline struct bio_vec *bvec_init_iter_all(struct bvec_iter_all *iter_all)
