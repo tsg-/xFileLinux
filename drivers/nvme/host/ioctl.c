@@ -459,6 +459,7 @@ static enum rq_end_io_ret nvme_uring_cmd_end_io(struct request *req,
 			pdu->status = blk_status_to_errno(err);
 	}
 	pdu->result = le64_to_cpu(nvme_req(req)->result.u64);
+	io_uring_cmd_detach_dmabuf(ioucmd);
 
 	/*
 	 * For IOPOLL, check if this completion is happening in the context
