@@ -80,6 +80,9 @@ static ssize_t ext4_dio_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 	if (!ext4_should_use_dio(iocb, to)) {
 		inode_unlock_shared(inode);
+		/* no buffered fallback for dma-buf I/O */
+		if (iov_iter_is_dmabuf_map(to))
+			return -EOPNOTSUPP;
 		/*
 		 * Fallback to buffered I/O if the operation being performed on
 		 * the inode is not supported by direct I/O. The IOCB_DIRECT
@@ -138,6 +141,11 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 	if (!iov_iter_count(to))
 		return 0; /* skip atime */
+
+	/* dma-buf I/O must be direct I/O */
+	if (iov_iter_is_dmabuf_map(to) &&
+	    (IS_DAX(inode) || !(iocb->ki_flags & IOCB_DIRECT)))
+		return -EOPNOTSUPP;
 
 #ifdef CONFIG_FS_DAX
 	if (IS_DAX(inode))
@@ -630,6 +638,9 @@ static ssize_t ext4_dio_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			inode_unlock_shared(inode);
 		else
 			inode_unlock(inode);
+		/* no buffered fallback for dma-buf I/O */
+		if (iov_iter_is_dmabuf_map(from))
+			return -EOPNOTSUPP;
 		return ext4_buffered_write_iter(iocb, from);
 	}
 
@@ -687,6 +698,10 @@ out:
 	if (ret >= 0 && iov_iter_count(from)) {
 		ssize_t err;
 		loff_t endbyte;
+
+		/* no buffered fallback for dma-buf I/O */
+		if (iov_iter_is_dmabuf_map(from))
+			return ret ?: -EOPNOTSUPP;
 
 		/*
 		 * There is no support for atomic writes on buffered-io yet,
@@ -790,6 +805,11 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ret = ext4_emergency_state(inode->i_sb);
 	if (unlikely(ret))
 		return ret;
+
+	/* dma-buf I/O must be direct I/O */
+	if (iov_iter_is_dmabuf_map(from) &&
+	    (IS_DAX(inode) || !(iocb->ki_flags & IOCB_DIRECT)))
+		return -EOPNOTSUPP;
 
 #ifdef CONFIG_FS_DAX
 	if (IS_DAX(inode))
@@ -1050,6 +1070,41 @@ loff_t ext4_llseek(struct file *file, loff_t offset, int whence)
 	return vfs_setpos(file, offset, maxbytes);
 }
 
+static bool ext4_file_supports_dma_buf_io(struct file *file)
+{
+	struct inode *inode = file_inode(file);
+
+	if (!(file->f_flags & O_DIRECT))
+		return false;
+	if (ext4_forced_shutdown(inode->i_sb))
+		return false;
+	if (IS_DAX(inode))
+		return false;
+	if (IS_ENCRYPTED(inode))
+		return false;
+	if (IS_VERITY(inode))
+		return false;
+	if (ext4_dio_alignment(inode) == 0)
+		return false;
+
+	return true;
+}
+
+static int ext4_file_init_dma_buf_io_ctx(struct file *file,
+					 struct dma_buf_io_ctx *ctx)
+{
+	struct inode *inode = file_inode(file);
+	struct block_device *bdev = inode->i_sb->s_bdev;
+
+	if (ext4_forced_shutdown(inode->i_sb))
+		return -EIO;
+	if (!(file->f_flags & O_DIRECT))
+		return -EINVAL;
+	if (!ext4_file_supports_dma_buf_io(file))
+		return -EOPNOTSUPP;
+	return iomap_file_init_dma_buf_io_ctx(file, bdev, ctx);
+}
+
 const struct file_operations ext4_file_operations = {
 	.llseek		= ext4_llseek,
 	.read_iter	= ext4_file_read_iter,
@@ -1071,6 +1126,7 @@ const struct file_operations ext4_file_operations = {
 			  FOP_DIO_PARALLEL_WRITE |
 			  FOP_DONTCACHE,
 	.setlease	= generic_setlease,
+	.init_dma_buf_io_ctx = ext4_file_init_dma_buf_io_ctx,
 };
 
 const struct inode_operations ext4_file_inode_operations = {
