@@ -1822,6 +1822,13 @@ static void dm_submit_bio(struct bio *bio)
 	int srcu_idx;
 	struct dm_table *map;
 
+	if (unlikely(op_is_dmabuf(bio->bi_opf))) {
+		WARN_ON_ONCE(1);
+		bio->bi_status = BLK_STS_NOTSUPP;
+		bio_endio(bio);
+		return;
+	}
+
 	map = dm_get_live_table(md, &srcu_idx);
 	if (unlikely(!map)) {
 		DMERR_LIMIT("%s: mapping table unavailable, erroring io",

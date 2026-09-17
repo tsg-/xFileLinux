@@ -19,6 +19,7 @@ struct io_context;
 struct cgroup_subsys_state;
 typedef void (bio_end_io_t) (struct bio *);
 struct bio_crypt_ctx;
+struct dma_buf_io_map;
 
 /*
  * The basic unit of block I/O is a sector. It is used in a number of contexts
@@ -312,7 +313,11 @@ struct bio {
 
 	atomic_t		__bi_cnt;	/* pin count */
 
-	struct bio_vec		*bi_io_vec;	/* the actual vec list */
+	union {
+		struct bio_vec		*bi_io_vec;	/* the actual vec list */
+		/* Driver-specific DMA map, valid iff REQ_DMABUF is set. */
+		struct dma_buf_io_map	*bi_dmabuf_map;
+	};
 
 	struct bio_set		*bi_pool;
 
@@ -422,6 +427,7 @@ enum req_flag_bits {
 	__REQ_SWAP,		/* swap I/O */
 	__REQ_DRV,		/* for driver use */
 	__REQ_FS_PRIVATE,	/* for file system (submitter) use */
+	__REQ_DMABUF,	/* using premapped DMA-BUF memory */
 
 	/*
 	 * Command specific flags, keep last:
@@ -454,6 +460,7 @@ enum req_flag_bits {
 #define REQ_SWAP	(__force blk_opf_t)(1ULL << __REQ_SWAP)
 #define REQ_DRV		(__force blk_opf_t)(1ULL << __REQ_DRV)
 #define REQ_FS_PRIVATE	(__force blk_opf_t)(1ULL << __REQ_FS_PRIVATE)
+#define REQ_DMABUF	(__force blk_opf_t)(1ULL << __REQ_DMABUF)
 
 #define REQ_NOUNMAP	(__force blk_opf_t)(1ULL << __REQ_NOUNMAP)
 
@@ -500,6 +507,11 @@ static inline bool op_is_sync(blk_opf_t op)
 {
 	return (op & REQ_OP_MASK) == REQ_OP_READ ||
 		(op & (REQ_SYNC | REQ_FUA | REQ_PREFLUSH));
+}
+
+static inline bool op_is_dmabuf(blk_opf_t op)
+{
+	return op & REQ_DMABUF;
 }
 
 static inline bool op_is_discard(blk_opf_t op)

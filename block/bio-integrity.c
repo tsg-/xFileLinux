@@ -224,6 +224,13 @@ bool bio_integrity_prep(struct bio *bio)
 	if (!bi)
 		return true;
 
+	if (unlikely(op_is_dmabuf(bio->bi_opf))) {
+		WARN_ON_ONCE(1);
+		bio->bi_status = BLK_STS_NOTSUPP;
+		bio_endio(bio);
+		return false;
+	}
+
 	if (bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE)
 		return true;
 

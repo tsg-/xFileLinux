@@ -404,6 +404,13 @@ static void md_submit_bio(struct bio *bio)
 	const int rw = bio_data_dir(bio);
 	struct mddev *mddev = bio->bi_bdev->bd_disk->private_data;
 
+	if (unlikely(op_is_dmabuf(bio->bi_opf))) {
+		WARN_ON_ONCE(1);
+		bio->bi_status = BLK_STS_NOTSUPP;
+		bio_endio(bio);
+		return;
+	}
+
 	if (mddev == NULL || mddev->pers == NULL) {
 		bio_io_error(bio);
 		return;

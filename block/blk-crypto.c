@@ -275,6 +275,12 @@ bool __blk_crypto_bio_prep(struct bio **bio_ptr)
 	struct bio *bio = *bio_ptr;
 	const struct blk_crypto_key *bc_key = bio->bi_crypt_context->bc_key;
 
+	if (unlikely(op_is_dmabuf(bio->bi_opf))) {
+		WARN_ON_ONCE(1);
+		bio->bi_status = BLK_STS_NOTSUPP;
+		goto fail;
+	}
+
 	/* Error if bio has no data. */
 	if (WARN_ON_ONCE(!bio_has_data(bio))) {
 		bio->bi_status = BLK_STS_IOERR;

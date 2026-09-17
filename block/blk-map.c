@@ -540,6 +540,11 @@ int blk_rq_append_bio(struct request *rq, struct bio *bio)
 	struct bio_vec bv;
 	unsigned int nr_segs = 0;
 
+	if (unlikely(op_is_dmabuf(bio->bi_opf))) {
+		WARN_ON_ONCE(1);
+		return -EOPNOTSUPP;
+	}
+
 	bio_for_each_bvec(bv, bio, iter)
 		nr_segs++;
 

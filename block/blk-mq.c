@@ -3021,6 +3021,13 @@ void blk_mq_submit_bio(struct bio *bio)
 	unsigned int nr_segs = 1;
 	blk_status_t ret;
 
+	if (unlikely(op_is_dmabuf(bio->bi_opf) && blk_queue_may_bounce(q))) {
+		WARN_ON_ONCE(1);
+		bio->bi_status = BLK_STS_NOTSUPP;
+		bio_endio(bio);
+		return;
+	}
+
 	bio = blk_queue_bounce(bio, q);
 
 	if (plug) {

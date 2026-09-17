@@ -10,6 +10,7 @@
 #include <linux/scatterlist.h>
 #include <linux/part_stat.h>
 #include <linux/blk-cgroup.h>
+#include <linux/dma-buf-io.h>
 
 #include <trace/events/block.h>
 
@@ -53,6 +54,12 @@ static inline bool bio_will_gap(struct request_queue *q,
 		struct request *prev_rq, struct bio *prev, struct bio *next)
 {
 	struct bio_vec pb, nb;
+
+	if (unlikely(op_is_dmabuf(prev->bi_opf) ||
+		     op_is_dmabuf(next->bi_opf))) {
+		WARN_ON_ONCE(1);
+		return true;
+	}
 
 	if (!bio_has_data(prev) || !queue_virt_boundary(q))
 		return false;
@@ -291,6 +298,26 @@ struct bio *bio_split_rw(struct bio *bio, const struct queue_limits *lim,
 	struct bvec_iter iter;
 	unsigned nsegs = 0, bytes = 0;
 
+	if (op_is_dmabuf(bio->bi_opf)) {
+		unsigned int seg_shift = bio->bi_dmabuf_map->seg_shift;
+		unsigned int offset;
+		u64 max_bytes_by_segs;
+
+		if (WARN_ON_ONCE(!seg_shift || seg_shift >= 63))
+			return ERR_PTR(-EINVAL);
+
+		offset = bio->bi_iter.bi_bvec_done & ((1ULL << seg_shift) - 1);
+		max_bytes_by_segs = (u64)lim->max_segments << seg_shift;
+		bytes = min_t(u64, min_t(u32, bio->bi_iter.bi_size, max_bytes),
+				  max_bytes_by_segs - offset);
+		nsegs = 1;
+		if (bytes == bio->bi_iter.bi_size) {
+			*segs = nsegs;
+			return NULL;
+		}
+		goto split;
+	}
+
 	bio_for_each_bvec(bv, bio, iter) {
 		/*
 		 * If the queue doesn't support SG gaps and adding this
@@ -427,6 +454,11 @@ unsigned int blk_recalc_rq_segments(struct request *rq)
 	if (!rq->bio)
 		return 0;
 
+	if (unlikely(op_is_dmabuf(rq->bio->bi_opf))) {
+		WARN_ON_ONCE(1);
+		return 1;
+	}
+
 	switch (bio_op(rq->bio)) {
 	case REQ_OP_DISCARD:
 	case REQ_OP_SECURE_ERASE:
@@ -542,6 +574,10 @@ static int __blk_bios_map_sg(struct request_queue *q, struct bio *bio,
 	bool new_bio = false;
 
 	for_each_bio(bio) {
+		if (unlikely(op_is_dmabuf(bio->bi_opf))) {
+			WARN_ON_ONCE(1);
+			return 0;
+		}
 		bio_for_each_bvec(bvec, bio, iter) {
 			/*
 			 * Only try to merge bvecs from two bios given we

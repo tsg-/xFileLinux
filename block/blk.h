@@ -317,6 +317,9 @@ ssize_t part_timeout_store(struct device *, struct device_attribute *,
 static inline bool bio_may_exceed_limits(struct bio *bio,
 					 const struct queue_limits *lim)
 {
+	if (op_is_dmabuf(bio->bi_opf))
+		return true;
+
 	switch (bio_op(bio)) {
 	case REQ_OP_DISCARD:
 	case REQ_OP_SECURE_ERASE:

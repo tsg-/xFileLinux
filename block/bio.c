@@ -611,6 +611,9 @@ void zero_fill_bio_iter(struct bio *bio, struct bvec_iter start)
 	struct bio_vec bv;
 	struct bvec_iter iter;
 
+	if (WARN_ON_ONCE(op_is_dmabuf(bio->bi_opf)))
+		return;
+
 	__bio_for_each_segment(bv, bio, iter, start)
 		memzero_bvec(&bv);
 }
@@ -635,6 +638,12 @@ static void bio_truncate(struct bio *bio, unsigned new_size)
 
 	if (new_size >= bio->bi_iter.bi_size)
 		return;
+
+	if (op_is_dmabuf(bio->bi_opf)) {
+		WARN_ON_ONCE(1);
+		bio->bi_iter.bi_size = new_size;
+		return;
+	}
 
 	if (bio_op(bio) != REQ_OP_READ)
 		goto exit;
@@ -855,7 +864,10 @@ struct bio *bio_alloc_clone(struct block_device *bdev, struct bio *bio_src,
 		bio_put(bio);
 		return NULL;
 	}
-	bio->bi_io_vec = bio_src->bi_io_vec;
+	if (op_is_dmabuf(bio->bi_opf))
+		bio->bi_dmabuf_map = bio_src->bi_dmabuf_map;
+	else
+		bio->bi_io_vec = bio_src->bi_io_vec;
 
 	return bio;
 }
@@ -878,11 +890,17 @@ int bio_init_clone(struct block_device *bdev, struct bio *bio,
 {
 	int ret;
 
-	bio_init(bio, bdev, bio_src->bi_io_vec, 0, bio_src->bi_opf);
+	bio_init(bio, bdev, NULL, 0, bio_src->bi_opf);
 	ret = __bio_clone(bio, bio_src, gfp);
-	if (ret)
+	if (ret) {
 		bio_uninit(bio);
-	return ret;
+		return ret;
+	}
+	if (op_is_dmabuf(bio->bi_opf))
+		bio->bi_dmabuf_map = bio_src->bi_dmabuf_map;
+	else
+		bio->bi_io_vec = bio_src->bi_io_vec;
+	return 0;
 }
 EXPORT_SYMBOL(bio_init_clone);
 
@@ -1151,6 +1169,9 @@ void __bio_release_pages(struct bio *bio, bool mark_dirty)
 {
 	struct folio_iter fi;
 
+	if (WARN_ON_ONCE(op_is_dmabuf(bio->bi_opf)))
+		return;
+
 	bio_for_each_folio_all(fi, bio) {
 		struct page *page;
 		size_t nr_pages;
@@ -1183,8 +1204,14 @@ void bio_iov_bvec_set(struct bio *bio, struct iov_iter *iter)
 		size = min(size, max_sectors << SECTOR_SHIFT);
 	}
 
-	bio->bi_vcnt = iter->nr_segs;
-	bio->bi_io_vec = (struct bio_vec *)iter->bvec;
+	if (iov_iter_is_dmabuf_map(iter)) {
+		bio->bi_vcnt = 0;
+		bio->bi_dmabuf_map = iter->dmabuf_map;
+		bio->bi_opf |= REQ_NOMERGE | REQ_DMABUF;
+	} else {
+		bio->bi_vcnt = iter->nr_segs;
+		bio->bi_io_vec = (struct bio_vec *)iter->bvec;
+	}
 	bio->bi_iter.bi_bvec_done = iter->iov_offset;
 	bio->bi_iter.bi_size = size;
 	bio_set_flag(bio, BIO_CLONED);
@@ -1335,7 +1362,7 @@ int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter)
 	if (WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED)))
 		return -EIO;
 
-	if (iov_iter_is_bvec(iter)) {
+	if (iov_iter_is_bvec(iter) || iov_iter_is_dmabuf_map(iter)) {
 		bio_iov_bvec_set(bio, iter);
 		iov_iter_advance(iter, bio->bi_iter.bi_size);
 		return 0;
@@ -1404,6 +1431,9 @@ EXPORT_SYMBOL(__bio_advance);
 void bio_copy_data_iter(struct bio *dst, struct bvec_iter *dst_iter,
 			struct bio *src, struct bvec_iter *src_iter)
 {
+	if (WARN_ON_ONCE(op_is_dmabuf(dst->bi_opf) ||
+			 op_is_dmabuf(src->bi_opf)))
+		return;
 	while (src_iter->bi_size && dst_iter->bi_size) {
 		struct bio_vec src_bv = bio_iter_iovec(src, *src_iter);
 		struct bio_vec dst_bv = bio_iter_iovec(dst, *dst_iter);
@@ -1444,6 +1474,9 @@ void bio_free_pages(struct bio *bio)
 	struct bio_vec *bvec;
 	struct bvec_iter_all iter_all;
 
+	if (WARN_ON_ONCE(op_is_dmabuf(bio->bi_opf)))
+		return;
+
 	bio_for_each_segment_all(bvec, bio, iter_all)
 		__free_page(bvec->bv_page);
 }
@@ -1475,6 +1508,9 @@ EXPORT_SYMBOL(bio_free_pages);
 void bio_set_pages_dirty(struct bio *bio)
 {
 	struct folio_iter fi;
+
+	if (WARN_ON_ONCE(op_is_dmabuf(bio->bi_opf)))
+		return;
 
 	bio_for_each_folio_all(fi, bio) {
 		folio_lock(fi.folio);
@@ -1524,6 +1560,9 @@ static void bio_dirty_fn(struct work_struct *work)
 void bio_check_pages_dirty(struct bio *bio)
 {
 	struct folio_iter fi;
+
+	if (WARN_ON_ONCE(op_is_dmabuf(bio->bi_opf)))
+		return;
 	unsigned long flags;
 
 	bio_for_each_folio_all(fi, bio) {
