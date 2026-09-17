@@ -682,8 +682,10 @@ static ssize_t blkdev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			ret = direct_write_fallback(iocb, from, ret,
 					blkdev_buffered_write(iocb, from));
 	} else {
-		if (unlikely(iov_iter_is_dmabuf_map(from)))
-			return -EOPNOTSUPP;
+		if (unlikely(iov_iter_is_dmabuf_map(from))) {
+			ret = -EOPNOTSUPP;
+			goto reexpand;
+		}
 
 		/*
 		 * Take i_rwsem and invalidate_lock to avoid racing with
@@ -695,6 +697,7 @@ static ssize_t blkdev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		inode_unlock_shared(bd_inode);
 	}
 
+reexpand:
 	if (ret > 0)
 		ret = generic_write_sync(iocb, ret);
 	iov_iter_reexpand(from, iov_iter_count(from) + shorted);
@@ -739,8 +742,11 @@ static ssize_t blkdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		if (ret < 0 || !count)
 			goto reexpand;
 	}
-	if (unlikely(iov_iter_is_dmabuf_map(to)))
-		return -EOPNOTSUPP;
+	if (unlikely(iov_iter_is_dmabuf_map(to))) {
+		if (!(iocb->ki_flags & IOCB_DIRECT))
+			ret = -EOPNOTSUPP;
+		goto reexpand;
+	}
 
 	/*
 	 * Take i_rwsem and invalidate_lock to avoid racing with set_blocksize
