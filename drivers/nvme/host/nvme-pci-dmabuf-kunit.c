@@ -45,6 +45,20 @@ static void nvme_dmabuf_range_rejects_overrun(struct kunit *test)
 			&range));
 }
 
+static void nvme_dmabuf_range_counts_uint_boundary(struct kunit *test)
+{
+	struct nvme_dmabuf_map map = {
+		.nr_entries = UINT_MAX,
+	};
+	struct nvme_dmabuf_range range;
+	unsigned int length = UINT_MAX - (NVME_CTRL_PAGE_SIZE - 2);
+
+	KUNIT_ASSERT_TRUE(test, nvme_dmabuf_map_range(&map, 0, length,
+						      &range));
+	KUNIT_EXPECT_EQ(test, range.nents,
+			1U << (32 - NVME_CTRL_PAGE_SHIFT));
+}
+
 static void nvme_dmabuf_sgl_counts_requested_segments(struct kunit *test)
 {
 	struct scatterlist sgl[3];
@@ -95,6 +109,7 @@ static struct kunit_case nvme_dmabuf_range_cases[] = {
 	KUNIT_CASE(nvme_dmabuf_range_crosses_controller_pages),
 	KUNIT_CASE(nvme_dmabuf_range_uses_bio_cursor),
 	KUNIT_CASE(nvme_dmabuf_range_rejects_overrun),
+	KUNIT_CASE(nvme_dmabuf_range_counts_uint_boundary),
 	KUNIT_CASE(nvme_dmabuf_sgl_counts_requested_segments),
 	KUNIT_CASE(nvme_dmabuf_sgl_rejects_incomplete_mapping),
 	{}

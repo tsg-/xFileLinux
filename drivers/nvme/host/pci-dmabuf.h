@@ -33,7 +33,7 @@ static inline bool nvme_dmabuf_map_range(const struct nvme_dmabuf_map *map,
 	    length > UINT_MAX - offset)
 		return false;
 
-	nents = DIV_ROUND_UP(offset + length, NVME_CTRL_PAGE_SIZE);
+	nents = DIV_ROUND_UP((u64)offset + length, NVME_CTRL_PAGE_SIZE);
 	if (nents > map->nr_entries - first)
 		return false;
 
