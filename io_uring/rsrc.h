@@ -88,9 +88,6 @@ io_ubuf_take(struct io_mapped_ubuf **slot)
 	return xchg(slot, NULL);
 }
 
-void io_queue_dmabuf_release(struct io_mapped_ubuf *imu);
-void io_release_dmabuf_reg(void *priv);
-
 void io_rsrc_node_ref_zero(struct io_rsrc_node *node);
 void io_rsrc_node_destroy(struct io_ring_ctx *ctx, struct io_rsrc_node *ref_node);
 struct io_rsrc_node *io_rsrc_node_alloc(struct io_ring_ctx *ctx);

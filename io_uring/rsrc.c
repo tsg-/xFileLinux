@@ -138,6 +138,8 @@ static int io_buffer_validate(struct iovec *iov)
 	return 0;
 }
 
+static void io_release_dmabuf_reg(void *priv);
+
 static int io_register_dmabuf(struct io_ring_ctx *ctx,
 			      const struct io_uring_regbuf_desc *desc,
 			      struct io_mapped_ubuf **pimu)
@@ -248,7 +250,7 @@ static void io_dmabuf_release_work(struct work_struct *work)
 	kvfree(imu);
 }
 
-void io_queue_dmabuf_release(struct io_mapped_ubuf *imu)
+static void io_queue_dmabuf_release(struct io_mapped_ubuf *imu)
 {
 	if (WARN_ON_ONCE(!imu->release)) {
 		kvfree(imu);
@@ -259,7 +261,7 @@ void io_queue_dmabuf_release(struct io_mapped_ubuf *imu)
 	queue_work(system_unbound_wq, &imu->release_work);
 }
 
-void io_release_dmabuf_reg(void *priv)
+static void io_release_dmabuf_reg(void *priv)
 {
 	struct io_dmabuf_reg *reg = priv;
 
