@@ -310,6 +310,10 @@ struct bio *bio_split_rw(struct bio *bio, const struct queue_limits *lim,
 		max_bytes_by_segs = (u64)lim->max_segments << seg_shift;
 		bytes = min_t(u64, min_t(u32, bio->bi_iter.bi_size, max_bytes),
 				  max_bytes_by_segs - offset);
+		/*
+		 * The DMA-BUF map owns physical segment accounting; the block
+		 * layer has no bvecs to inspect for this opaque request.
+		 */
 		nsegs = 1;
 		if (bytes == bio->bi_iter.bi_size) {
 			*segs = nsegs;

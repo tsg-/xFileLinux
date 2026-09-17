@@ -528,7 +528,8 @@ static inline bool nvme_pci_use_sgls(struct nvme_dev *dev, struct request *req,
 
 static inline bool nvme_rq_is_dmabuf(struct request *req)
 {
-	return req->bio && op_is_dmabuf(req->bio->bi_opf);
+	return IS_ENABLED(CONFIG_DMA_SHARED_BUFFER) &&
+		req->bio && op_is_dmabuf(req->bio->bi_opf);
 }
 
 static void nvme_free_prps(struct nvme_dev *dev, struct request *req)

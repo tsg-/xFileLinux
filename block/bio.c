@@ -1560,10 +1560,10 @@ static void bio_dirty_fn(struct work_struct *work)
 void bio_check_pages_dirty(struct bio *bio)
 {
 	struct folio_iter fi;
+	unsigned long flags;
 
 	if (WARN_ON_ONCE(op_is_dmabuf(bio->bi_opf)))
 		return;
-	unsigned long flags;
 
 	bio_for_each_folio_all(fi, bio) {
 		if (!folio_test_dirty(fi.folio))
