@@ -19,6 +19,8 @@
 
 #include <trace/events/block.h>
 
+struct dma_buf_io_ctx;
+
 extern const struct pr_ops nvme_pr_ops;
 
 extern unsigned int nvme_io_timeout;
@@ -568,6 +570,8 @@ struct nvme_ctrl_ops {
 	int (*get_address)(struct nvme_ctrl *ctrl, char *buf, int size);
 	void (*print_device_info)(struct nvme_ctrl *ctrl);
 	bool (*supports_pci_p2pdma)(struct nvme_ctrl *ctrl);
+	int (*init_dma_buf_io_ctx)(struct nvme_ctrl *ctrl,
+				   struct dma_buf_io_ctx *ctx);
 };
 
 /*
