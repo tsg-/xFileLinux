@@ -160,6 +160,31 @@ static void bio_dmabuf_limit_split_test(struct kunit *test)
 	bio_put(bio);
 }
 
+static void bio_dmabuf_zoned_split_rejects_zero_bytes_test(struct kunit *test)
+{
+	struct queue_limits limits = {
+		.logical_block_size = SECTOR_SIZE,
+		.max_segments = 1,
+		.zone_write_granularity = 2 * PAGE_SIZE,
+	};
+	struct dma_buf_io_map map = {
+		.seg_shift = PAGE_SHIFT,
+	};
+	struct bio *bio, *split;
+	unsigned int segs;
+
+	bio = bio_dmabuf_test_alloc(NULL, &map, WRITE, 0, 3 * PAGE_SIZE);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, bio);
+	split = bio_split_rw(bio, &limits, &segs, &fs_bio_set,
+			     2 * PAGE_SIZE);
+	KUNIT_ASSERT_TRUE(test, IS_ERR(split));
+	KUNIT_EXPECT_EQ(test, PTR_ERR(split), -EINVAL);
+	KUNIT_EXPECT_EQ(test, bio->bi_iter.bi_size, 3U * PAGE_SIZE);
+	KUNIT_EXPECT_EQ(test, bio->bi_iter.bi_bvec_done, 0U);
+
+	bio_put(bio);
+}
+
 #if IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY)
 struct bio_dmabuf_test_endio {
 	bool called;
@@ -227,6 +252,7 @@ static struct kunit_case bio_dmabuf_test_cases[] = {
 	KUNIT_CASE(bio_dmabuf_iterator_zero_test),
 	KUNIT_CASE(bio_dmabuf_split_keeps_map_cursor_test),
 	KUNIT_CASE(bio_dmabuf_limit_split_test),
+	KUNIT_CASE(bio_dmabuf_zoned_split_rejects_zero_bytes_test),
 #if IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY)
 	KUNIT_CASE(bio_dmabuf_integrity_is_rejected_test),
 #endif

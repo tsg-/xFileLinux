@@ -315,6 +315,8 @@ struct bio *bio_split_rw(struct bio *bio, const struct queue_limits *lim,
 			*segs = nsegs;
 			return NULL;
 		}
+		if (bytes < bio_split_alignment(bio, lim))
+			return ERR_PTR(-EINVAL);
 		goto split;
 	}
 
