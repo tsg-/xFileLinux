@@ -9,6 +9,11 @@
 #include <linux/hugetlb.h>
 #include <linux/compat.h>
 #include <linux/io_uring.h>
+#include <linux/dma-buf-io.h>
+
+#if IS_ENABLED(CONFIG_KUNIT)
+#include <kunit/test.h>
+#endif
 
 #include <uapi/linux/io_uring.h>
 
@@ -132,19 +137,51 @@ static int io_buffer_validate(struct iovec *iov)
 	return 0;
 }
 
+static void io_dmabuf_release_work(struct work_struct *work)
+{
+	struct io_mapped_ubuf *imu = container_of(work,
+			struct io_mapped_ubuf, release_work);
+
+	imu->release(imu->priv);
+	kvfree(imu);
+}
+
+void io_queue_dmabuf_release(struct io_mapped_ubuf *imu)
+{
+	if (WARN_ON_ONCE(!imu->release)) {
+		kvfree(imu);
+		return;
+	}
+
+	INIT_WORK(&imu->release_work, io_dmabuf_release_work);
+	queue_work(system_unbound_wq, &imu->release_work);
+}
+
+void io_release_dmabuf_reg(void *priv)
+{
+	struct io_dmabuf_reg *reg = priv;
+
+	fput(reg->target_file);
+	dma_buf_io_ctx_release(reg->ctx);
+	kfree(reg);
+}
+
 static void io_buffer_unmap(struct io_ring_ctx *ctx, struct io_mapped_ubuf **slot)
 {
-	struct io_mapped_ubuf *imu = *slot;
+	struct io_mapped_ubuf *imu = io_ubuf_take(slot);
 	unsigned int i;
 
-	if (imu != &dummy_ubuf) {
-		for (i = 0; i < imu->nr_bvecs; i++)
-			unpin_user_page(imu->bvec[i].bv_page);
-		if (imu->acct_pages)
-			io_unaccount_mem(ctx, imu->acct_pages);
-		kvfree(imu);
+	if (!imu || imu == &dummy_ubuf)
+		return;
+	if (io_ubuf_is_dmabuf(imu)) {
+		io_queue_dmabuf_release(imu);
+		return;
 	}
-	*slot = NULL;
+	for (i = 0; i < imu->nr_bvecs; i++)
+		unpin_user_page(imu->bvec[i].bv_page);
+	if (imu->acct_pages)
+		io_unaccount_mem(ctx, imu->acct_pages);
+	kvfree(imu);
 }
 
 static void io_rsrc_put_work(struct io_rsrc_node *node)
@@ -830,6 +867,8 @@ static bool headpage_already_acct(struct io_ring_ctx *ctx, struct page **pages,
 	for (i = 0; i < ctx->nr_user_bufs; i++) {
 		struct io_mapped_ubuf *imu = ctx->user_bufs[i];
 
+		if (io_ubuf_is_dmabuf(imu))
+			continue;
 		for (j = 0; j < imu->nr_bvecs; j++) {
 			if (!PageCompound(imu->bvec[j].bv_page))
 				continue;
@@ -926,6 +965,7 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, struct iovec *iov,
 	imu = kvmalloc(struct_size(imu, bvec, nr_pages), GFP_KERNEL);
 	if (!imu)
 		goto done;
+	imu->flags = 0;
 
 	ret = io_buffer_account_pin(ctx, pages, nr_pages, imu, last_hpage);
 	if (ret) {
@@ -1030,6 +1070,8 @@ int io_import_fixed(int ddir, struct iov_iter *iter,
 
 	if (WARN_ON_ONCE(!imu))
 		return -EFAULT;
+	if (WARN_ON_ONCE(io_ubuf_is_dmabuf(imu)))
+		return -EOPNOTSUPP;
 	if (unlikely(check_add_overflow(buf_addr, (u64)len, &buf_end)))
 		return -EFAULT;
 	/* not inside the mapped region */
@@ -1087,3 +1129,66 @@ int io_import_fixed(int ddir, struct iov_iter *iter,
 
 	return 0;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+struct io_dmabuf_release_test {
+	struct completion	done;
+	atomic_t		calls;
+};
+
+static void io_dmabuf_release_test_cb(void *data)
+{
+	struct io_dmabuf_release_test *test = data;
+
+	might_sleep();
+	atomic_inc(&test->calls);
+	complete(&test->done);
+}
+
+static void io_dmabuf_release_transfers_ownership_test(struct kunit *test)
+{
+	struct io_dmabuf_release_test release = {};
+	struct io_ring_ctx *ctx;
+	struct io_mapped_ubuf *slot;
+
+	init_completion(&release.done);
+	atomic_set(&release.calls, 0);
+
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	mutex_init(&ctx->uring_lock);
+
+	slot = kzalloc(sizeof(*slot), GFP_KERNEL);
+	if (!slot) {
+		kfree(ctx);
+		KUNIT_FAIL(test, "failed to allocate mapped buffer");
+		return;
+	}
+	slot->flags = IO_REGBUF_F_DMABUF;
+	slot->release = io_dmabuf_release_test_cb;
+	slot->priv = &release;
+
+	mutex_lock(&ctx->uring_lock);
+	io_buffer_unmap(ctx, &slot);
+	io_buffer_unmap(ctx, &slot);
+	mutex_unlock(&ctx->uring_lock);
+
+	KUNIT_EXPECT_PTR_EQ(test, slot, NULL);
+	KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&release.done, HZ),
+			0UL);
+	KUNIT_EXPECT_EQ(test, atomic_read(&release.calls), 1);
+	kfree(ctx);
+}
+
+static struct kunit_case io_dmabuf_release_test_cases[] = {
+	KUNIT_CASE(io_dmabuf_release_transfers_ownership_test),
+	{}
+};
+
+static struct kunit_suite io_dmabuf_release_test_suite = {
+	.name = "io-rsrc-dmabuf-release",
+	.test_cases = io_dmabuf_release_test_cases,
+};
+
+kunit_test_suite(io_dmabuf_release_test_suite);
+#endif

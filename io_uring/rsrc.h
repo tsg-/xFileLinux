@@ -17,6 +17,15 @@ enum {
 	IORING_RSRC_BUFFER		= 1,
 };
 
+enum {
+	IO_REGBUF_F_DMABUF		= 1U << 3,
+};
+
+struct io_dmabuf_reg {
+	struct dma_buf_io_ctx	*ctx;
+	struct file		*target_file;
+};
+
 struct io_rsrc_put {
 	u64 tag;
 	union {
@@ -54,8 +63,27 @@ struct io_mapped_ubuf {
 	u64		ubuf_end;
 	unsigned int	nr_bvecs;
 	unsigned long	acct_pages;
+	u8		flags;
+	u8		dmabuf_dir;
+	void		(*release)(void *priv);
+	void		*priv;
+	struct work_struct release_work;
 	struct bio_vec	bvec[] __counted_by(nr_bvecs);
 };
+
+static inline bool io_ubuf_is_dmabuf(const struct io_mapped_ubuf *imu)
+{
+	return imu->flags & IO_REGBUF_F_DMABUF;
+}
+
+static inline struct io_mapped_ubuf *
+io_ubuf_take(struct io_mapped_ubuf **slot)
+{
+	return xchg(slot, NULL);
+}
+
+void io_queue_dmabuf_release(struct io_mapped_ubuf *imu);
+void io_release_dmabuf_reg(void *priv);
 
 void io_rsrc_node_ref_zero(struct io_rsrc_node *node);
 void io_rsrc_node_destroy(struct io_ring_ctx *ctx, struct io_rsrc_node *ref_node);
