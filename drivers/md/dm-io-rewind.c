@@ -6,6 +6,9 @@
 #include <linux/bio.h>
 #include <linux/blk-crypto.h>
 #include <linux/blk-integrity.h>
+#if IS_ENABLED(CONFIG_KUNIT)
+#include <kunit/test.h>
+#endif
 
 #include "dm-core.h"
 
@@ -113,10 +116,13 @@ static inline void dm_bio_rewind_iter(const struct bio *bio,
 	iter->bi_sector -= bytes >> 9;
 
 	/* No advance means no rewind */
-	if (bio_no_advance_iter(bio))
+	if (bio_no_advance_iter(bio)) {
 		iter->bi_size += bytes;
-	else
+		if (op_is_dmabuf(bio->bi_opf))
+			iter->bi_bvec_done -= bytes;
+	} else {
 		dm_bvec_iter_rewind(bio->bi_io_vec, iter, bytes);
+	}
 }
 
 /**
@@ -162,3 +168,35 @@ void dm_io_rewind(struct dm_io *io, struct bio_set *bs)
 	atomic_dec(&orig->__bi_remaining);
 	io->orig_bio = new_orig;
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+static void dm_bio_rewind_dmabuf_cursor_test(struct kunit *test)
+{
+	struct bio bio = {
+		.bi_opf = REQ_OP_READ | REQ_DMABUF,
+	};
+	struct bvec_iter iter = {
+		.bi_sector = PAGE_SECTORS,
+		.bi_size = PAGE_SIZE,
+		.bi_bvec_done = PAGE_SIZE,
+	};
+
+	dm_bio_rewind_iter(&bio, &iter, PAGE_SIZE);
+
+	KUNIT_EXPECT_EQ(test, iter.bi_sector, (sector_t)0);
+	KUNIT_EXPECT_EQ(test, iter.bi_size, (unsigned int)2 * PAGE_SIZE);
+	KUNIT_EXPECT_EQ(test, iter.bi_bvec_done, 0U);
+}
+
+static struct kunit_case dm_io_rewind_test_cases[] = {
+	KUNIT_CASE(dm_bio_rewind_dmabuf_cursor_test),
+	{}
+};
+
+static struct kunit_suite dm_io_rewind_test_suite = {
+	.name = "dm-io-rewind",
+	.test_cases = dm_io_rewind_test_cases,
+};
+
+kunit_test_suite(dm_io_rewind_test_suite);
+#endif
