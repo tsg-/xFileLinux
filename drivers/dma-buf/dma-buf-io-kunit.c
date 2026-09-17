@@ -20,11 +20,16 @@ struct dma_buf_io_test {
 	struct completion map_entered;
 	struct completion allow_map;
 	struct completion creator_done;
+	struct completion map_held;
+	struct completion allow_drop;
+	struct completion holder_done;
 	struct completion mover_attempted;
+	struct completion move_notify_entered;
 	struct completion mover_done;
 	struct completion unmap_done;
 	atomic_t unmaps;
 	bool saw_published_map;
+	int holder_error;
 };
 
 struct dma_buf_io_test_map {
@@ -126,6 +131,7 @@ static void dma_buf_io_test_move_notify(struct dma_buf_attachment *attach)
 	struct dma_buf_io_test *test = attach->importer_priv;
 	struct dma_buf_io_map *map;
 
+	complete(&test->move_notify_entered);
 	scoped_guard(mutex, &test->ctx->map_mutex) {
 		map = rcu_dereference_protected(test->ctx->map,
 				lockdep_is_held(&test->ctx->map_mutex));
@@ -171,7 +177,11 @@ dma_buf_io_test_create(struct kunit *test)
 	init_completion(&ctx->map_entered);
 	init_completion(&ctx->allow_map);
 	init_completion(&ctx->creator_done);
+	init_completion(&ctx->map_held);
+	init_completion(&ctx->allow_drop);
+	init_completion(&ctx->holder_done);
 	init_completion(&ctx->mover_attempted);
+	init_completion(&ctx->move_notify_entered);
 	init_completion(&ctx->mover_done);
 	init_completion(&ctx->unmap_done);
 	atomic_set(&ctx->unmaps, 0);
@@ -220,6 +230,28 @@ static int dma_buf_io_test_creator(void *data)
 	if (!IS_ERR(map))
 		dma_buf_io_map_drop(map);
 	complete(&test->creator_done);
+	return 0;
+}
+
+static int dma_buf_io_test_holder(void *data)
+{
+	struct dma_buf_io_test *test = data;
+	struct dma_buf_io_map *map;
+
+	map = dma_buf_io_create_map(test->ctx);
+	if (IS_ERR(map)) {
+		test->holder_error = PTR_ERR(map);
+		complete(&test->map_held);
+		complete(&test->holder_done);
+		return 0;
+	}
+
+	complete(&test->map_held);
+	if (!wait_for_completion_timeout(&test->allow_drop,
+					 DMA_BUF_IO_TEST_TIMEOUT))
+		test->holder_error = -ETIMEDOUT;
+	dma_buf_io_map_drop(map);
+	complete(&test->holder_done);
 	return 0;
 }
 
@@ -303,8 +335,74 @@ out:
 	dma_buf_io_test_destroy(ctx);
 }
 
+static void dma_buf_io_move_waits_for_active_map_test(struct kunit *test)
+{
+	struct dma_buf_io_test *ctx;
+	struct task_struct *holder = NULL;
+	struct task_struct *mover = NULL;
+	struct dma_buf_io_map *map;
+
+	ctx = dma_buf_io_test_create(test);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+
+	holder = kthread_create(dma_buf_io_test_holder, ctx,
+				"dma_buf_io_holder");
+	if (IS_ERR(holder)) {
+		KUNIT_FAIL(test, "failed to start map holder");
+		holder = NULL;
+		goto out;
+	}
+	get_task_struct(holder);
+	wake_up_process(holder);
+	complete(&ctx->allow_map);
+	if (!dma_buf_io_test_wait(test, &ctx->map_held, "map holder"))
+		goto out;
+	if (ctx->holder_error) {
+		KUNIT_FAIL(test, "map holder failed: %d", ctx->holder_error);
+		goto out;
+	}
+
+	mover = kthread_create(dma_buf_io_test_mover, ctx,
+			       "dma_buf_io_mover");
+	if (IS_ERR(mover)) {
+		KUNIT_FAIL(test, "failed to start mover");
+		mover = NULL;
+		goto out;
+	}
+	get_task_struct(mover);
+	wake_up_process(mover);
+	if (!dma_buf_io_test_wait(test, &ctx->move_notify_entered,
+				  "move notify entry"))
+		goto out;
+	KUNIT_EXPECT_FALSE(test, wait_for_completion_timeout(&ctx->mover_done,
+						      HZ / 10));
+
+	complete(&ctx->allow_drop);
+	if (!dma_buf_io_test_wait(test, &ctx->holder_done, "map holder") ||
+	    !dma_buf_io_test_wait(test, &ctx->mover_done, "move notify") ||
+	    !dma_buf_io_test_wait(test, &ctx->unmap_done, "map unmap"))
+		goto out;
+
+	KUNIT_EXPECT_TRUE(test, ctx->saw_published_map);
+	scoped_guard(mutex, &ctx->ctx->map_mutex) {
+		map = rcu_dereference_protected(ctx->ctx->map,
+				lockdep_is_held(&ctx->ctx->map_mutex));
+		KUNIT_EXPECT_NULL(test, map);
+	}
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx->unmaps), 1);
+out:
+	complete_all(&ctx->allow_map);
+	complete_all(&ctx->allow_drop);
+	if (holder)
+		kthread_stop_put(holder);
+	if (mover)
+		kthread_stop_put(mover);
+	dma_buf_io_test_destroy(ctx);
+}
+
 static struct kunit_case dma_buf_io_test_cases[] = {
 	KUNIT_CASE(dma_buf_io_publish_before_move_notify_test),
+	KUNIT_CASE(dma_buf_io_move_waits_for_active_map_test),
 	{}
 };
 
