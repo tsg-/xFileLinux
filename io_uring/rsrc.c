@@ -1186,6 +1186,18 @@ int io_sqe_buffers_register(struct io_ring_ctx *ctx, void __user *arg,
 	return ret;
 }
 
+static bool io_dmabuf_file_compatible(struct file *file,
+				      struct file *target_file)
+{
+	if (file == target_file)
+		return true;
+	if (file->f_op != target_file->f_op)
+		return false;
+	if (file->f_op->dma_buf_io_compatible)
+		return file->f_op->dma_buf_io_compatible(file, target_file);
+	return false;
+}
+
 void io_req_drop_dmabuf(struct io_kiocb *req)
 {
 	struct dma_buf_io_map *map;
@@ -1208,7 +1220,7 @@ static int io_import_dmabuf(struct io_kiocb *req, int ddir,
 		return -EOPNOTSUPP;
 	if (!len)
 		return -EFAULT;
-	if (req->file != reg->target_file)
+	if (!io_dmabuf_file_compatible(req->file, reg->target_file))
 		return -EBADF;
 
 	map = req->dmabuf_map;

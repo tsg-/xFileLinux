@@ -1956,6 +1956,8 @@ struct file_operations {
 	int (*uring_cmd_iopoll)(struct io_uring_cmd *, struct io_comp_batch *,
 				unsigned int poll_flags);
 	int (*init_dma_buf_io_ctx)(struct file *, struct dma_buf_io_ctx *);
+	bool (*dma_buf_io_compatible)(struct file *file,
+				      struct file *target_file);
 } __randomize_layout;
 
 /* Wrap a directory iterator that needs exclusive inode access */
