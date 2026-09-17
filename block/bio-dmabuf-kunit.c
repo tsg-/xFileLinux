@@ -78,6 +78,34 @@ static void bio_dmabuf_iterator_cursor_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, iov_iter_gap_alignment(&iter), 0UL);
 }
 
+static void bio_dmabuf_iterator_alignment_test(struct kunit *test)
+{
+	struct dma_buf_io_map map = {};
+	struct iov_iter iter;
+
+	iov_iter_dmabuf_map(&iter, WRITE, &map, 1, PAGE_SIZE);
+	KUNIT_EXPECT_FALSE(test, iov_iter_is_aligned(&iter, 3,
+						     SECTOR_SIZE - 1));
+
+	iov_iter_dmabuf_map(&iter, WRITE, &map, 4, PAGE_SIZE);
+	KUNIT_EXPECT_TRUE(test, iov_iter_is_aligned(&iter, 3,
+						    SECTOR_SIZE - 1));
+
+	iov_iter_dmabuf_map(&iter, WRITE, &map, 4, PAGE_SIZE + 1);
+	KUNIT_EXPECT_FALSE(test, iov_iter_is_aligned(&iter, 3,
+						     SECTOR_SIZE - 1));
+}
+
+static void bio_dmabuf_iterator_zero_test(struct kunit *test)
+{
+	struct dma_buf_io_map map = {};
+	struct iov_iter iter;
+
+	iov_iter_dmabuf_map(&iter, READ, &map, 0, PAGE_SIZE);
+	KUNIT_EXPECT_EQ(test, iov_iter_zero(PAGE_SIZE, &iter), 0UL);
+	KUNIT_EXPECT_EQ(test, iov_iter_count(&iter), (size_t)PAGE_SIZE);
+}
+
 static void bio_dmabuf_split_keeps_map_cursor_test(struct kunit *test)
 {
 	struct dma_buf_io_map map = {
@@ -195,6 +223,8 @@ static void bio_dmabuf_integrity_is_rejected_test(struct kunit *test)
 static struct kunit_case bio_dmabuf_test_cases[] = {
 	KUNIT_CASE(bio_dmabuf_iterator_type_test),
 	KUNIT_CASE(bio_dmabuf_iterator_cursor_test),
+	KUNIT_CASE(bio_dmabuf_iterator_alignment_test),
+	KUNIT_CASE(bio_dmabuf_iterator_zero_test),
 	KUNIT_CASE(bio_dmabuf_split_keeps_map_cursor_test),
 	KUNIT_CASE(bio_dmabuf_limit_split_test),
 #if IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY)

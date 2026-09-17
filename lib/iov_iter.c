@@ -152,6 +152,8 @@ __out:								\
 			size_t len;				\
 			iterate_xarray(i, n, base, len, off,	\
 							(K))	\
+		} else if (iov_iter_is_dmabuf_map(i)) {	\
+			n = 0;					\
 		}						\
 		i->count -= n;					\
 	}							\
@@ -896,6 +898,13 @@ bool iov_iter_is_aligned(const struct iov_iter *i, unsigned addr_mask,
 
 	if (iov_iter_is_bvec(i))
 		return iov_iter_aligned_bvec(i, addr_mask, len_mask);
+
+	if (iov_iter_is_dmabuf_map(i)) {
+		if (i->count & len_mask)
+			return false;
+		if (i->iov_offset & addr_mask)
+			return false;
+	}
 
 	if (iov_iter_is_xarray(i)) {
 		if (i->count & len_mask)
