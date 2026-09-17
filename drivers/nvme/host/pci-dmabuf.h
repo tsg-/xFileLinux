@@ -43,4 +43,40 @@ static inline bool nvme_dmabuf_map_range(const struct nvme_dmabuf_map *map,
 	return true;
 }
 
+static inline unsigned int nvme_dmabuf_sgl_nents(
+		const struct nvme_dmabuf_map *map, unsigned int bvec_done,
+		unsigned int length)
+{
+	struct nvme_dmabuf_range range;
+	struct scatterlist *sg;
+	unsigned long i;
+	unsigned int offset = bvec_done, remaining = length, nents = 0;
+
+	if (!map->sgt || !nvme_dmabuf_map_range(map, bvec_done, length,
+						&range))
+		return 0;
+
+	for_each_sgtable_dma_sg(map->sgt, sg, i) {
+		unsigned int sg_len = sg_dma_len(sg);
+
+		if (!sg_len)
+			return 0;
+		if (offset >= sg_len) {
+			offset -= sg_len;
+			continue;
+		}
+
+		sg_len -= offset;
+		offset = 0;
+		if (nents == UINT_MAX)
+			return 0;
+		nents++;
+		if (remaining <= sg_len)
+			return nents;
+		remaining -= sg_len;
+	}
+
+	return 0;
+}
+
 #endif /* _NVME_PCI_DMABUF_H */

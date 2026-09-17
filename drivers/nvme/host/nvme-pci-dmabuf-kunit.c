@@ -45,10 +45,58 @@ static void nvme_dmabuf_range_rejects_overrun(struct kunit *test)
 			&range));
 }
 
+static void nvme_dmabuf_sgl_counts_requested_segments(struct kunit *test)
+{
+	struct scatterlist sgl[3];
+	struct sg_table sgt = {
+		.sgl = sgl,
+		.nents = ARRAY_SIZE(sgl),
+		.orig_nents = ARRAY_SIZE(sgl),
+	};
+	struct nvme_dmabuf_map map = {
+		.sgt = &sgt,
+		.nr_entries = 5,
+	};
+
+	sg_init_table(sgl, ARRAY_SIZE(sgl));
+	sg_dma_len(&sgl[0]) = 2 * NVME_CTRL_PAGE_SIZE;
+	sg_dma_len(&sgl[1]) = 2 * NVME_CTRL_PAGE_SIZE;
+	sg_dma_len(&sgl[2]) = NVME_CTRL_PAGE_SIZE;
+
+	KUNIT_EXPECT_EQ(test, nvme_dmabuf_sgl_nents(&map,
+			NVME_CTRL_PAGE_SIZE + NVME_CTRL_PAGE_SIZE / 2,
+			3 * NVME_CTRL_PAGE_SIZE), 3U);
+}
+
+static void nvme_dmabuf_sgl_rejects_incomplete_mapping(struct kunit *test)
+{
+	struct scatterlist sgl[3];
+	struct sg_table sgt = {
+		.sgl = sgl,
+		.nents = 2,
+		.orig_nents = ARRAY_SIZE(sgl),
+	};
+	struct nvme_dmabuf_map map = {
+		.sgt = &sgt,
+		.nr_entries = 5,
+	};
+
+	sg_init_table(sgl, ARRAY_SIZE(sgl));
+	sg_dma_len(&sgl[0]) = 2 * NVME_CTRL_PAGE_SIZE;
+	sg_dma_len(&sgl[1]) = 2 * NVME_CTRL_PAGE_SIZE;
+	sg_dma_len(&sgl[2]) = NVME_CTRL_PAGE_SIZE;
+
+	KUNIT_EXPECT_EQ(test, nvme_dmabuf_sgl_nents(&map,
+			NVME_CTRL_PAGE_SIZE + NVME_CTRL_PAGE_SIZE / 2,
+			3 * NVME_CTRL_PAGE_SIZE), 0U);
+}
+
 static struct kunit_case nvme_dmabuf_range_cases[] = {
 	KUNIT_CASE(nvme_dmabuf_range_crosses_controller_pages),
 	KUNIT_CASE(nvme_dmabuf_range_uses_bio_cursor),
 	KUNIT_CASE(nvme_dmabuf_range_rejects_overrun),
+	KUNIT_CASE(nvme_dmabuf_sgl_counts_requested_segments),
+	KUNIT_CASE(nvme_dmabuf_sgl_rejects_incomplete_mapping),
 	{}
 };
 
