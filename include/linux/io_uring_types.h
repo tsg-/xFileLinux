@@ -7,6 +7,8 @@
 #include <linux/llist.h>
 #include <uapi/linux/io_uring.h>
 
+struct dma_buf_io_map;
+
 struct io_wq_work_node {
 	struct io_wq_work_node *next;
 };
@@ -590,6 +592,7 @@ struct io_kiocb {
 	/* custom credentials, valid IFF REQ_F_CREDS is set */
 	const struct cred		*creds;
 	struct io_wq_work		work;
+	struct dma_buf_io_map		*dmabuf_map;
 
 	struct {
 		u64			extra1;

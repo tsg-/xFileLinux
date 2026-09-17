@@ -10,6 +10,7 @@
 #include <linux/compat.h>
 #include <linux/io_uring.h>
 #include <linux/dma-buf-io.h>
+#include <linux/sizes.h>
 
 #if IS_ENABLED(CONFIG_KUNIT)
 #include <kunit/test.h>
@@ -135,6 +136,107 @@ static int io_buffer_validate(struct iovec *iov)
 		return -EOVERFLOW;
 
 	return 0;
+}
+
+static int io_register_dmabuf(struct io_ring_ctx *ctx,
+			      const struct io_uring_regbuf_desc *desc,
+			      struct io_mapped_ubuf **pimu)
+{
+	struct io_mapped_ubuf *imu = NULL;
+	struct io_dmabuf_reg *reg = NULL;
+	struct file *target_file = NULL;
+	struct dma_buf *dmabuf = NULL;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_DMA_SHARED_BUFFER))
+		return -EOPNOTSUPP;
+	if (ctx->flags & IORING_SETUP_IOPOLL)
+		return -EOPNOTSUPP;
+	if (desc->uaddr || desc->size)
+		return -EINVAL;
+
+	reg = kzalloc(sizeof(*reg), GFP_KERNEL);
+	if (!reg)
+		return -ENOMEM;
+	imu = kzalloc(sizeof(*imu), GFP_KERNEL);
+	if (!imu) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	ret = -EBADF;
+	target_file = fget(desc->target_fd);
+	if (!target_file)
+		goto err;
+	dmabuf = dma_buf_get(desc->dmabuf_fd);
+	if (IS_ERR(dmabuf)) {
+		ret = PTR_ERR(dmabuf);
+		dmabuf = NULL;
+		goto err;
+	}
+	/*
+	 * Keep 6.6 bi_bvec_done within its u32 domain. The NVMe DMA-BUF
+	 * path derives the map index from that byte offset.
+	 */
+	if (dmabuf->size > SZ_1G) {
+		ret = -EINVAL;
+		goto err;
+	}
+
+	ret = dma_buf_io_ctx_create(target_file, dmabuf, DMA_BIDIRECTIONAL,
+				    &reg->ctx);
+	if (ret)
+		goto err;
+
+	reg->target_file = target_file;
+	imu->ubuf = 0;
+	imu->ubuf_end = dmabuf->size;
+	imu->nr_bvecs = 0;
+	imu->flags = IO_REGBUF_F_DMABUF;
+	imu->dmabuf_dir = DMA_BIDIRECTIONAL;
+	imu->release = io_release_dmabuf_reg;
+	imu->priv = reg;
+	*pimu = imu;
+	dma_buf_put(dmabuf);
+	return 0;
+err:
+	kfree(imu);
+	kfree(reg);
+	if (target_file)
+		fput(target_file);
+	if (dmabuf)
+		dma_buf_put(dmabuf);
+	return ret;
+}
+
+static int io_sqe_buffer_register_desc(struct io_ring_ctx *ctx,
+		const struct io_uring_regbuf_desc *desc,
+		struct io_mapped_ubuf **pimu, struct page **last_hpage)
+{
+	struct iovec iov = {};
+
+	if (desc->type >= __IO_REGBUF_TYPE_MAX)
+		return -EINVAL;
+	if (desc->flags || !mem_is_zero(desc->__resv, sizeof(desc->__resv)))
+		return -EINVAL;
+
+	switch (desc->type) {
+	case IO_REGBUF_TYPE_EMPTY:
+		if (desc->uaddr || desc->size)
+			return -EFAULT;
+		break;
+	case IO_REGBUF_TYPE_UADDR:
+		if (desc->dmabuf_fd || desc->target_fd)
+			return -EINVAL;
+		iov.iov_base = u64_to_user_ptr(desc->uaddr);
+		iov.iov_len = desc->size;
+		break;
+	case IO_REGBUF_TYPE_DMABUF:
+		return io_register_dmabuf(ctx, desc, pimu);
+	}
+
+	return io_buffer_validate(&iov) ?:
+		io_sqe_buffer_register(ctx, &iov, pimu, last_hpage);
 }
 
 static void io_dmabuf_release_work(struct work_struct *work)
@@ -404,6 +506,8 @@ static int __io_sqe_files_update(struct io_ring_ctx *ctx,
 		return -ENXIO;
 	if (up->offset + nr_args > ctx->nr_user_files)
 		return -EINVAL;
+	if (up->flags)
+		return -EINVAL;
 
 	for (done = 0; done < nr_args; done++) {
 		u64 tag = 0;
@@ -458,8 +562,8 @@ static int __io_sqe_buffers_update(struct io_ring_ctx *ctx,
 				   struct io_uring_rsrc_update2 *up,
 				   unsigned int nr_args)
 {
+	bool extended = up->flags & IORING_RSRC_UPDATE_EXTENDED;
 	u64 __user *tags = u64_to_user_ptr(up->tags);
-	struct iovec iov, __user *iovs = u64_to_user_ptr(up->data);
 	struct page *last_hpage = NULL;
 	__u32 done;
 	int i, err;
@@ -468,26 +572,47 @@ static int __io_sqe_buffers_update(struct io_ring_ctx *ctx,
 		return -ENXIO;
 	if (up->offset + nr_args > ctx->nr_user_bufs)
 		return -EINVAL;
+	if (up->flags & ~IORING_RSRC_UPDATE_EXTENDED)
+		return -EINVAL;
 
 	for (done = 0; done < nr_args; done++) {
 		struct io_mapped_ubuf *imu;
 		u64 tag = 0;
 
-		err = io_copy_iov(ctx, &iov, iovs, done);
-		if (err)
-			break;
 		if (tags && copy_from_user(&tag, &tags[done], sizeof(tag))) {
 			err = -EFAULT;
 			break;
 		}
-		err = io_buffer_validate(&iov);
-		if (err)
-			break;
-		if (!iov.iov_base && tag) {
-			err = -EINVAL;
-			break;
+		if (extended) {
+			struct io_uring_regbuf_desc desc;
+			void __user *data = u64_to_user_ptr(up->data);
+
+			if (copy_from_user(&desc, data + done * sizeof(desc),
+					   sizeof(desc))) {
+				err = -EFAULT;
+				break;
+			}
+			err = io_sqe_buffer_register_desc(ctx, &desc, &imu,
+							  &last_hpage);
+			if (!err && desc.type == IO_REGBUF_TYPE_EMPTY && tag)
+				err = -EINVAL;
+		} else {
+			struct iovec iov;
+			void __user *data = u64_to_user_ptr(up->data);
+
+			err = io_copy_iov(ctx, &iov, data, done);
+			if (err)
+				break;
+			err = io_buffer_validate(&iov);
+			if (err)
+				break;
+			if (!iov.iov_base && tag) {
+				err = -EINVAL;
+				break;
+			}
+			err = io_sqe_buffer_register(ctx, &iov, &imu,
+						     &last_hpage);
 		}
-		err = io_sqe_buffer_register(ctx, &iov, &imu, &last_hpage);
 		if (err)
 			break;
 
@@ -538,7 +663,7 @@ int io_register_files_update(struct io_ring_ctx *ctx, void __user *arg,
 	memset(&up, 0, sizeof(up));
 	if (copy_from_user(&up, arg, sizeof(struct io_uring_rsrc_update)))
 		return -EFAULT;
-	if (up.resv || up.resv2)
+	if (up.flags || up.resv2)
 		return -EINVAL;
 	return __io_register_rsrc_update(ctx, IORING_RSRC_FILE, &up, nr_args);
 }
@@ -552,7 +677,7 @@ int io_register_rsrc_update(struct io_ring_ctx *ctx, void __user *arg,
 		return -EINVAL;
 	if (copy_from_user(&up, arg, sizeof(up)))
 		return -EFAULT;
-	if (!up.nr || up.resv || up.resv2)
+	if (!up.nr || (up.flags & ~IORING_RSRC_UPDATE_EXTENDED) || up.resv2)
 		return -EINVAL;
 	return __io_register_rsrc_update(ctx, type, &up, up.nr);
 }
@@ -656,7 +781,7 @@ int io_files_update(struct io_kiocb *req, unsigned int issue_flags)
 	up2.data = up->arg;
 	up2.nr = 0;
 	up2.tags = 0;
-	up2.resv = 0;
+	up2.flags = 0;
 	up2.resv2 = 0;
 
 	if (up->offset == IORING_FILE_INDEX_ALLOC) {
@@ -1061,28 +1186,77 @@ int io_sqe_buffers_register(struct io_ring_ctx *ctx, void __user *arg,
 	return ret;
 }
 
-int io_import_fixed(int ddir, struct iov_iter *iter,
-			   struct io_mapped_ubuf *imu,
-			   u64 buf_addr, size_t len)
+void io_req_drop_dmabuf(struct io_kiocb *req)
+{
+	struct dma_buf_io_map *map;
+
+	map = xchg(&req->dmabuf_map, NULL);
+	if (map)
+		dma_buf_io_map_drop(map);
+}
+
+static int io_import_dmabuf(struct io_kiocb *req, int ddir,
+			    struct iov_iter *iter,
+			    struct io_mapped_ubuf *imu,
+			    size_t len, size_t offset,
+			    unsigned int issue_flags)
+{
+	struct io_dmabuf_reg *reg = imu->priv;
+	struct dma_buf_io_map *map;
+
+	if (!IS_ENABLED(CONFIG_DMA_SHARED_BUFFER))
+		return -EOPNOTSUPP;
+	if (!len)
+		return -EFAULT;
+	if (req->file != reg->target_file)
+		return -EBADF;
+
+	map = req->dmabuf_map;
+	if (!map) {
+		map = dma_buf_io_get_map(reg->ctx);
+		if (unlikely(!map)) {
+			if (!(issue_flags & IO_URING_F_IOWQ))
+				return -EAGAIN;
+			map = dma_buf_io_create_map(reg->ctx);
+			if (IS_ERR(map))
+				return PTR_ERR(map);
+		}
+		req->dmabuf_map = map;
+	}
+	iov_iter_dmabuf_map(iter, ddir, map, offset, len);
+	return 0;
+}
+
+static int __io_import_fixed(struct io_kiocb *req, int ddir,
+			     struct iov_iter *iter,
+			     struct io_mapped_ubuf *imu,
+			     u64 buf_addr, size_t len,
+			     unsigned int issue_flags,
+			     unsigned int import_flags)
 {
 	u64 buf_end;
 	size_t offset;
 
 	if (WARN_ON_ONCE(!imu))
 		return -EFAULT;
-	if (WARN_ON_ONCE(io_ubuf_is_dmabuf(imu)))
-		return -EOPNOTSUPP;
 	if (unlikely(check_add_overflow(buf_addr, (u64)len, &buf_end)))
 		return -EFAULT;
 	/* not inside the mapped region */
 	if (unlikely(buf_addr < imu->ubuf || buf_end > imu->ubuf_end))
 		return -EFAULT;
 
+	offset = buf_addr - imu->ubuf;
+	if (io_ubuf_is_dmabuf(imu)) {
+		if (!(import_flags & IO_REGBUF_IMPORT_ALLOW_DMABUF))
+			return -EFAULT;
+		return io_import_dmabuf(req, ddir, iter, imu, len, offset,
+					issue_flags);
+	}
+
 	/*
 	 * Might not be a start of buffer, set size appropriately
 	 * and advance us to the beginning.
 	 */
-	offset = buf_addr - imu->ubuf;
 	iov_iter_bvec(iter, ddir, imu->bvec, imu->nr_bvecs, offset + len);
 
 	if (offset) {
@@ -1128,6 +1302,21 @@ int io_import_fixed(int ddir, struct iov_iter *iter,
 	}
 
 	return 0;
+}
+
+int io_import_fixed(int ddir, struct iov_iter *iter,
+		    struct io_mapped_ubuf *imu,
+		    u64 buf_addr, size_t len)
+{
+	return __io_import_fixed(NULL, ddir, iter, imu, buf_addr, len, 0, 0);
+}
+
+int io_import_reg_buf(struct io_kiocb *req, int ddir,
+		      struct iov_iter *iter, struct io_mapped_ubuf *imu,
+		      u64 buf_addr, size_t len, unsigned int issue_flags)
+{
+	return __io_import_fixed(req, ddir, iter, imu, buf_addr, len,
+				 issue_flags, IO_REGBUF_IMPORT_ALLOW_DMABUF);
 }
 
 #if IS_ENABLED(CONFIG_KUNIT)
@@ -1180,8 +1369,97 @@ static void io_dmabuf_release_transfers_ownership_test(struct kunit *test)
 	kfree(ctx);
 }
 
+static void io_dmabuf_import_requires_rw_path_test(struct kunit *test)
+{
+	struct io_mapped_ubuf imu = {
+		.ubuf = 0,
+		.ubuf_end = PAGE_SIZE,
+		.flags = IO_REGBUF_F_DMABUF,
+	};
+	struct iov_iter iter;
+
+	KUNIT_EXPECT_EQ(test, io_import_fixed(ITER_SOURCE, &iter, &imu, 0, 1),
+			-EFAULT);
+}
+
+static void io_dmabuf_import_punts_without_iowq_test(struct kunit *test)
+{
+	static const struct file_operations fops;
+	struct dma_buf_io_ctx ctx = {};
+	struct io_dmabuf_reg reg = {
+		.ctx = &ctx,
+	};
+	struct io_mapped_ubuf imu = {
+		.ubuf = 0,
+		.ubuf_end = PAGE_SIZE,
+		.flags = IO_REGBUF_F_DMABUF,
+		.priv = &reg,
+	};
+	struct file file = {
+		.f_op = &fops,
+	};
+	struct io_kiocb req = {
+		.file = &file,
+	};
+	struct iov_iter iter;
+
+	reg.target_file = &file;
+	KUNIT_EXPECT_EQ(test, io_import_reg_buf(&req, ITER_SOURCE, &iter,
+						&imu, 0, 1, 0), -EAGAIN);
+	KUNIT_EXPECT_PTR_EQ(test, req.dmabuf_map, NULL);
+}
+
+static void io_dmabuf_import_rejects_zero_length_test(struct kunit *test)
+{
+	struct io_mapped_ubuf imu = {
+		.ubuf = 0,
+		.ubuf_end = PAGE_SIZE,
+		.flags = IO_REGBUF_F_DMABUF,
+	};
+	struct io_kiocb req = {};
+	struct iov_iter iter;
+
+	KUNIT_EXPECT_EQ(test, io_import_reg_buf(&req, ITER_SOURCE, &iter,
+						&imu, 0, 0, 0), -EFAULT);
+}
+
+static void io_dmabuf_import_rejects_incompatible_file_test(struct kunit *test)
+{
+	static const struct file_operations target_fops;
+	static const struct file_operations request_fops;
+	struct dma_buf_io_ctx ctx = {};
+	struct file target_file = {
+		.f_op = &target_fops,
+	};
+	struct io_dmabuf_reg reg = {
+		.ctx = &ctx,
+		.target_file = &target_file,
+	};
+	struct io_mapped_ubuf imu = {
+		.ubuf = 0,
+		.ubuf_end = PAGE_SIZE,
+		.flags = IO_REGBUF_F_DMABUF,
+		.priv = &reg,
+	};
+	struct file request_file = {
+		.f_op = &request_fops,
+	};
+	struct io_kiocb req = {
+		.file = &request_file,
+	};
+	struct iov_iter iter;
+
+	KUNIT_EXPECT_EQ(test, io_import_reg_buf(&req, ITER_SOURCE, &iter,
+						&imu, 0, 1, 0), -EBADF);
+	KUNIT_EXPECT_PTR_EQ(test, req.dmabuf_map, NULL);
+}
+
 static struct kunit_case io_dmabuf_release_test_cases[] = {
 	KUNIT_CASE(io_dmabuf_release_transfers_ownership_test),
+	KUNIT_CASE(io_dmabuf_import_requires_rw_path_test),
+	KUNIT_CASE(io_dmabuf_import_punts_without_iowq_test),
+	KUNIT_CASE(io_dmabuf_import_rejects_zero_length_test),
+	KUNIT_CASE(io_dmabuf_import_rejects_incompatible_file_test),
 	{}
 };
 

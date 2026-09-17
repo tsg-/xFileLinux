@@ -997,6 +997,7 @@ static void __io_req_complete_post(struct io_kiocb *req, unsigned issue_flags)
 		io_put_kbuf_comp(req);
 		if (unlikely(req->flags & IO_REQ_CLEAN_FLAGS))
 			io_clean_op(req);
+		io_req_drop_dmabuf(req);
 		io_put_file(req);
 
 		rsrc_node = req->rsrc_node;
@@ -1519,6 +1520,7 @@ static void io_free_batch_list(struct io_ring_ctx *ctx,
 			if (unlikely(req->flags & IO_REQ_CLEAN_FLAGS))
 				io_clean_op(req);
 		}
+		io_req_drop_dmabuf(req);
 		io_put_file(req);
 
 		io_req_put_rsrc_locked(req, ctx);
@@ -2151,6 +2153,7 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	req->cqe.user_data = READ_ONCE(sqe->user_data);
 	req->file = NULL;
 	req->rsrc_node = NULL;
+	req->dmabuf_map = NULL;
 	req->task = current;
 
 	if (unlikely(opcode >= IORING_OP_LAST)) {

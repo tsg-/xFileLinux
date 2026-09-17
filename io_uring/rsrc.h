@@ -21,10 +21,16 @@ enum {
 	IO_REGBUF_F_DMABUF		= 1U << 3,
 };
 
+enum {
+	IO_REGBUF_IMPORT_ALLOW_DMABUF	= 1U << 1,
+};
+
 struct io_dmabuf_reg {
 	struct dma_buf_io_ctx	*ctx;
 	struct file		*target_file;
 };
+
+struct io_kiocb;
 
 struct io_rsrc_put {
 	u64 tag;
@@ -93,6 +99,10 @@ int io_queue_rsrc_removal(struct io_rsrc_data *data, unsigned idx, void *rsrc);
 int io_import_fixed(int ddir, struct iov_iter *iter,
 			   struct io_mapped_ubuf *imu,
 			   u64 buf_addr, size_t len);
+int io_import_reg_buf(struct io_kiocb *req, int ddir,
+		      struct iov_iter *iter, struct io_mapped_ubuf *imu,
+		      u64 buf_addr, size_t len, unsigned int issue_flags);
+void io_req_drop_dmabuf(struct io_kiocb *req);
 
 void __io_sqe_buffers_unregister(struct io_ring_ctx *ctx);
 int io_sqe_buffers_unregister(struct io_ring_ctx *ctx);
