@@ -28,9 +28,13 @@
 #include <linux/io-64-nonatomic-hi-lo.h>
 #include <linux/sed-opal.h>
 #include <linux/pci-p2pdma.h>
+#include <linux/dma-buf-io.h>
+#include <linux/dma-resv.h>
+#include <linux/overflow.h>
 
 #include "trace.h"
 #include "nvme.h"
+#include "pci-dmabuf.h"
 
 #define SQ_SIZE(q)	((q)->q_depth << (q)->sqes)
 #define CQ_SIZE(q)	((q)->q_depth * sizeof(struct nvme_completion))
@@ -522,6 +526,11 @@ static inline bool nvme_pci_use_sgls(struct nvme_dev *dev, struct request *req,
 	return true;
 }
 
+static inline bool nvme_rq_is_dmabuf(struct request *req)
+{
+	return req->bio && op_is_dmabuf(req->bio->bi_opf);
+}
+
 static void nvme_free_prps(struct nvme_dev *dev, struct request *req)
 {
 	const int last_prp = NVME_CTRL_PAGE_SIZE / sizeof(__le64) - 1;
@@ -538,9 +547,156 @@ static void nvme_free_prps(struct nvme_dev *dev, struct request *req)
 	}
 }
 
+static inline struct nvme_dmabuf_map *
+to_nvme_dmabuf_map(struct dma_buf_io_map *map)
+{
+	return container_of(map, struct nvme_dmabuf_map, base);
+}
+
+static bool nvme_dmabuf_map_sync(struct nvme_dev *dev, struct request *req,
+		bool for_cpu)
+{
+	struct bio *bio = req->bio;
+	struct nvme_dmabuf_map *map = to_nvme_dmabuf_map(bio->bi_dmabuf_map);
+	struct nvme_dmabuf_range range;
+	enum dma_data_direction dir;
+	unsigned int i;
+
+	if (!nvme_dmabuf_map_range(map, bio->bi_iter.bi_bvec_done,
+				   blk_rq_payload_bytes(req), &range))
+		return false;
+
+	dir = rq_data_dir(req) == READ ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
+	for (i = 0; i < range.nents; i++) {
+		dma_addr_t addr = map->dma_list[range.first + i];
+
+		if (for_cpu)
+			dma_sync_single_for_cpu(dev->dev, addr,
+						NVME_CTRL_PAGE_SIZE, dir);
+		else
+			dma_sync_single_for_device(dev->dev, addr,
+						   NVME_CTRL_PAGE_SIZE, dir);
+	}
+	return true;
+}
+
+static blk_status_t nvme_rq_setup_dmabuf_map(struct nvme_dev *dev,
+		struct request *req, struct nvme_rw_command *cmnd)
+{
+	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+	struct bio *bio = req->bio;
+	struct nvme_dmabuf_map *map = to_nvme_dmabuf_map(bio->bi_dmabuf_map);
+	struct nvme_dmabuf_range range;
+	struct dma_pool *pool;
+	unsigned int length = blk_rq_payload_bytes(req);
+	unsigned int first_len, map_idx, i;
+	__le64 *prp_list;
+	dma_addr_t prp_dma;
+	blk_status_t ret = BLK_STS_RESOURCE;
+
+	if (!nvme_dmabuf_map_range(map, bio->bi_iter.bi_bvec_done, length,
+				   &range))
+		return BLK_STS_IOERR;
+	if (!nvme_dmabuf_map_sync(dev, req, false))
+		return BLK_STS_IOERR;
+
+	map_idx = range.first;
+	cmnd->dptr.prp1 = cpu_to_le64(map->dma_list[map_idx++] + range.offset);
+	first_len = NVME_CTRL_PAGE_SIZE - range.offset;
+	if (length <= first_len) {
+		cmnd->dptr.prp2 = 0;
+		return BLK_STS_OK;
+	}
+
+	length -= first_len;
+	if (map_idx >= map->nr_entries)
+		return BLK_STS_IOERR;
+	if (length <= NVME_CTRL_PAGE_SIZE) {
+		cmnd->dptr.prp2 = cpu_to_le64(map->dma_list[map_idx]);
+		return BLK_STS_OK;
+	}
+
+	if (DIV_ROUND_UP(length, NVME_CTRL_PAGE_SIZE) <= (256 / 8)) {
+		pool = dev->prp_small_pool;
+		iod->nr_allocations = 0;
+	} else {
+		pool = dev->prp_page_pool;
+		iod->nr_allocations = 1;
+	}
+
+	prp_list = dma_pool_alloc(pool, GFP_ATOMIC, &prp_dma);
+	if (!prp_list) {
+		iod->nr_allocations = -1;
+		return BLK_STS_RESOURCE;
+	}
+	iod->list[0].prp_list = prp_list;
+	iod->first_dma = prp_dma;
+	cmnd->dptr.prp2 = cpu_to_le64(prp_dma);
+
+	i = 0;
+	for (;;) {
+		if (i == NVME_CTRL_PAGE_SIZE >> 3) {
+			__le64 *old_prp_list = prp_list;
+
+			if (iod->nr_allocations >= NVME_MAX_NR_ALLOCATIONS) {
+				ret = BLK_STS_IOERR;
+				goto free_prps;
+			}
+			prp_list = dma_pool_alloc(pool, GFP_ATOMIC, &prp_dma);
+			if (!prp_list)
+				goto free_prps;
+			iod->list[iod->nr_allocations++].prp_list = prp_list;
+			prp_list[0] = old_prp_list[i - 1];
+			old_prp_list[i - 1] = cpu_to_le64(prp_dma);
+			i = 1;
+		}
+		if (map_idx >= map->nr_entries) {
+			ret = BLK_STS_IOERR;
+			goto free_prps;
+		}
+		prp_list[i++] = cpu_to_le64(map->dma_list[map_idx++]);
+		if (length <= NVME_CTRL_PAGE_SIZE)
+			break;
+		length -= NVME_CTRL_PAGE_SIZE;
+	}
+	return BLK_STS_OK;
+
+free_prps:
+	if (iod->nr_allocations == 0)
+		dma_pool_free(pool, iod->list[0].prp_list, iod->first_dma);
+	else
+		nvme_free_prps(dev, req);
+	iod->nr_allocations = -1;
+	return ret;
+}
+
+static void nvme_rq_clean_dmabuf_map(struct nvme_dev *dev,
+		struct request *req)
+{
+	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+
+	WARN_ON_ONCE(!nvme_dmabuf_map_sync(dev, req, true));
+
+	if (iod->nr_allocations < 0)
+		return;
+	if (iod->nr_allocations == 0)
+		dma_pool_free(dev->prp_small_pool, iod->list[0].prp_list,
+			      iod->first_dma);
+	else if (iod->nr_allocations == 1)
+		dma_pool_free(dev->prp_page_pool, iod->list[0].prp_list,
+			      iod->first_dma);
+	else
+		nvme_free_prps(dev, req);
+}
+
 static void nvme_unmap_data(struct nvme_dev *dev, struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
+
+	if (nvme_rq_is_dmabuf(req)) {
+		nvme_rq_clean_dmabuf_map(dev, req);
+		return;
+	}
 
 	if (iod->dma_len) {
 		dma_unmap_page(dev->dev, iod->first_dma, iod->dma_len,
@@ -774,6 +930,9 @@ static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
 	blk_status_t ret = BLK_STS_RESOURCE;
 	int rc;
 
+	if (nvme_rq_is_dmabuf(req))
+		return nvme_rq_setup_dmabuf_map(dev, req, &cmnd->rw);
+
 	if (blk_rq_nr_phys_segments(req) == 1) {
 		struct nvme_queue *nvmeq = req->mq_hctx->driver_data;
 		struct bio_vec bv = req_bvec(req);
@@ -849,7 +1008,7 @@ static blk_status_t nvme_prep_rq(struct nvme_dev *dev, struct request *req)
 	if (ret)
 		return ret;
 
-	if (blk_rq_nr_phys_segments(req)) {
+	if (blk_rq_nr_phys_segments(req) || nvme_rq_is_dmabuf(req)) {
 		ret = nvme_map_data(dev, req, &iod->cmd);
 		if (ret)
 			goto out_free_cmd;
@@ -864,7 +1023,7 @@ static blk_status_t nvme_prep_rq(struct nvme_dev *dev, struct request *req)
 	nvme_start_request(req);
 	return BLK_STS_OK;
 out_unmap_data:
-	if (blk_rq_nr_phys_segments(req))
+	if (blk_rq_nr_phys_segments(req) || nvme_rq_is_dmabuf(req))
 		nvme_unmap_data(dev, req);
 out_free_cmd:
 	nvme_cleanup_cmd(req);
@@ -968,7 +1127,7 @@ static __always_inline void nvme_pci_unmap_rq(struct request *req)
 			       rq_integrity_vec(req).bv_len, rq_dma_dir(req));
 	}
 
-	if (blk_rq_nr_phys_segments(req))
+	if (blk_rq_nr_phys_segments(req) || nvme_rq_is_dmabuf(req))
 		nvme_unmap_data(dev, req);
 }
 
@@ -2949,6 +3108,131 @@ static bool nvme_pci_supports_pci_p2pdma(struct nvme_ctrl *ctrl)
 	return dma_pci_p2pdma_supported(dev->dev);
 }
 
+#ifdef CONFIG_DMA_SHARED_BUFFER
+static void nvme_dmabuf_move_notify(struct dma_buf_attachment *attach)
+{
+	dma_buf_io_invalidate_mappings(attach->importer_priv);
+}
+
+static const struct dma_buf_attach_ops nvme_dmabuf_importer_ops = {
+	.move_notify	= nvme_dmabuf_move_notify,
+	.allow_peer2peer	= true,
+};
+
+static struct dma_buf_io_map *nvme_dma_buf_io_map(struct dma_buf_io_ctx *ctx)
+{
+	struct dma_buf_attachment *attach = ctx->dev_priv;
+	struct nvme_dmabuf_map *map;
+	struct scatterlist *sg;
+	struct sg_table *sgt = NULL;
+	unsigned int nr_entries, seg_shift = UINT_MAX;
+	unsigned long tmp, i = 0;
+	size_t list_size, map_size;
+	int ret;
+
+	if (!ctx->dmabuf->size ||
+	    !IS_ALIGNED(ctx->dmabuf->size, NVME_CTRL_PAGE_SIZE))
+		return ERR_PTR(-EINVAL);
+	if (ctx->dmabuf->size / NVME_CTRL_PAGE_SIZE > UINT_MAX)
+		return ERR_PTR(-EOVERFLOW);
+	nr_entries = ctx->dmabuf->size / NVME_CTRL_PAGE_SIZE;
+	if (check_mul_overflow((size_t)nr_entries, sizeof(*map->dma_list),
+			       &list_size) ||
+	    check_add_overflow(sizeof(*map), list_size, &map_size))
+		return ERR_PTR(-EOVERFLOW);
+
+	dma_resv_assert_held(ctx->dmabuf->resv);
+
+	map = kmalloc(map_size, GFP_KERNEL);
+	if (!map)
+		return ERR_PTR(-ENOMEM);
+
+	sgt = dma_buf_map_attachment(attach, ctx->dir);
+	if (IS_ERR(sgt)) {
+		ret = PTR_ERR(sgt);
+		sgt = NULL;
+		goto err;
+	}
+
+	for_each_sgtable_dma_sg(sgt, sg, tmp) {
+		dma_addr_t dma_addr = sg_dma_address(sg);
+		unsigned int sg_len = sg_dma_len(sg);
+
+		if (!sg_len || !IS_ALIGNED(dma_addr, NVME_CTRL_PAGE_SIZE) ||
+		    !IS_ALIGNED(sg_len, NVME_CTRL_PAGE_SIZE)) {
+			ret = -EINVAL;
+			goto err;
+		}
+		seg_shift = min(seg_shift, __ffs(sg_len));
+
+		while (sg_len) {
+			if (i == nr_entries) {
+				ret = -EOVERFLOW;
+				goto err;
+			}
+			map->dma_list[i++] = dma_addr;
+			dma_addr += NVME_CTRL_PAGE_SIZE;
+			sg_len -= NVME_CTRL_PAGE_SIZE;
+		}
+	}
+
+	if (i != nr_entries || seg_shift < NVME_CTRL_PAGE_SHIFT) {
+		ret = -EINVAL;
+		goto err;
+	}
+
+	ret = dma_buf_io_init_map(ctx, &map->base);
+	if (ret)
+		goto err;
+	map->base.seg_shift = seg_shift;
+	map->nr_entries = nr_entries;
+	map->sgt = sgt;
+	return &map->base;
+err:
+	if (sgt)
+		dma_buf_unmap_attachment(attach, sgt, ctx->dir);
+	kfree(map);
+	return ERR_PTR(ret);
+}
+
+static void nvme_dma_buf_io_unmap(struct dma_buf_io_ctx *ctx,
+		struct dma_buf_io_map *map_base)
+{
+	struct dma_buf_attachment *attach = ctx->dev_priv;
+	struct nvme_dmabuf_map *map = to_nvme_dmabuf_map(map_base);
+
+	dma_resv_assert_held(ctx->dmabuf->resv);
+	dma_buf_unmap_attachment(attach, map->sgt, ctx->dir);
+}
+
+static void nvme_dma_buf_io_release(struct dma_buf_io_ctx *ctx)
+{
+	dma_buf_detach(ctx->dmabuf, ctx->dev_priv);
+}
+
+static const struct dma_buf_io_ops nvme_dma_buf_io_ops = {
+	.map		= nvme_dma_buf_io_map,
+	.unmap		= nvme_dma_buf_io_unmap,
+	.release	= nvme_dma_buf_io_release,
+};
+
+static int nvme_pci_init_dma_buf_io_ctx(struct nvme_ctrl *ctrl,
+		struct dma_buf_io_ctx *ctx)
+{
+	struct nvme_dev *dev = to_nvme_dev(ctrl);
+	struct dma_buf_attachment *attach;
+
+	attach = dma_buf_dynamic_attach(ctx->dmabuf, dev->dev,
+					&nvme_dmabuf_importer_ops, ctx);
+	if (IS_ERR(attach))
+		return PTR_ERR(attach);
+
+	ctx->dev_priv = attach;
+	ctx->dev_ops = &nvme_dma_buf_io_ops;
+	return 0;
+}
+#endif
+
 static const struct nvme_ctrl_ops nvme_pci_ctrl_ops = {
 	.name			= "pcie",
 	.module			= THIS_MODULE,
@@ -2963,6 +3247,9 @@ static const struct nvme_ctrl_ops nvme_pci_ctrl_ops = {
 	.get_address		= nvme_pci_get_address,
 	.print_device_info	= nvme_pci_print_device_info,
 	.supports_pci_p2pdma	= nvme_pci_supports_pci_p2pdma,
+#ifdef CONFIG_DMA_SHARED_BUFFER
+	.init_dma_buf_io_ctx	= nvme_pci_init_dma_buf_io_ctx,
+#endif
 };
 
 static int nvme_dev_map(struct nvme_dev *dev)
@@ -3703,5 +3990,6 @@ static void __exit nvme_exit(void)
 MODULE_AUTHOR("Matthew Wilcox <willy@linux.intel.com>");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1.0");
+MODULE_IMPORT_NS(DMA_BUF);
 module_init(nvme_init);
 module_exit(nvme_exit);
