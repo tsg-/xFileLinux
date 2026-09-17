@@ -225,7 +225,6 @@ bool bio_integrity_prep(struct bio *bio)
 		return true;
 
 	if (unlikely(op_is_dmabuf(bio->bi_opf))) {
-		WARN_ON_ONCE(1);
 		bio->bi_status = BLK_STS_NOTSUPP;
 		bio_endio(bio);
 		return false;

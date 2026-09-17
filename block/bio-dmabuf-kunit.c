@@ -10,22 +10,6 @@
 
 #define BIO_DMABUF_TEST_SPLIT_BYTES	(8 * 512)
 
-struct bio_dmabuf_test_endio {
-	bool called;
-};
-
-static void bio_dmabuf_test_endio(struct bio *bio)
-{
-	struct bio_dmabuf_test_endio *endio = bio->bi_private;
-
-	endio->called = true;
-}
-
-static blk_status_t bio_dmabuf_test_verify(struct blk_integrity_iter *iter)
-{
-	return BLK_STS_OK;
-}
-
 static struct bio *bio_dmabuf_test_alloc(struct block_device *bdev,
 		struct dma_buf_io_map *map, unsigned int direction,
 		unsigned int offset, unsigned int bytes)
@@ -177,6 +161,22 @@ static void bio_dmabuf_limit_split_test(struct kunit *test)
 }
 
 #if IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY)
+struct bio_dmabuf_test_endio {
+	bool called;
+};
+
+static void bio_dmabuf_test_endio(struct bio *bio)
+{
+	struct bio_dmabuf_test_endio *endio = bio->bi_private;
+
+	endio->called = true;
+}
+
+static blk_status_t bio_dmabuf_test_verify(struct blk_integrity_iter *iter)
+{
+	return BLK_STS_OK;
+}
+
 static void bio_dmabuf_integrity_is_rejected_test(struct kunit *test)
 {
 	struct blk_integrity_profile profile = {
