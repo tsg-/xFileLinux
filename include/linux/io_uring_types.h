@@ -8,6 +8,8 @@
 #include <linux/llist.h>
 #include <uapi/linux/io_uring.h>
 
+struct dma_buf_io_map;
+
 enum {
 	/*
 	 * A hint to not wake right away but delay until there are enough of
@@ -566,6 +568,7 @@ enum {
 	REQ_F_HAS_METADATA_BIT,
 	REQ_F_IMPORT_BUFFER_BIT,
 	REQ_F_SQE_COPIED_BIT,
+	REQ_F_DMABUF_BIT,
 
 	/* not a real bit, just to check we're not overflowing the space */
 	__REQ_F_LAST_BIT,
@@ -659,6 +662,8 @@ enum {
 	REQ_F_IMPORT_BUFFER	= IO_REQ_FLAG(REQ_F_IMPORT_BUFFER_BIT),
 	/* ->sqe_copy() has been called, if necessary */
 	REQ_F_SQE_COPIED	= IO_REQ_FLAG(REQ_F_SQE_COPIED_BIT),
+	/* there is a dma map attached to request that needs to be dropped */
+	REQ_F_DMABUF		= IO_REQ_FLAG(REQ_F_DMABUF_BIT),
 };
 
 struct io_tw_req {
@@ -783,6 +788,7 @@ struct io_kiocb {
 	/* custom credentials, valid IFF REQ_F_CREDS is set */
 	const struct cred		*creds;
 	struct io_wq_work		work;
+	struct dma_buf_io_map		*dmabuf_map;
 
 	struct io_big_cqe {
 		u64			extra1;
