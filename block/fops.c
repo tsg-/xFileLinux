@@ -966,6 +966,7 @@ int bdev_init_dma_buf_io_ctx(struct file *file, struct block_device *bdev,
 			     struct dma_buf_io_ctx *ctx)
 {
 	struct gendisk *disk = bdev->bd_disk;
+	int ret;
 
 	if (!(file->f_flags & O_DIRECT))
 		return -EINVAL;
@@ -975,7 +976,10 @@ int bdev_init_dma_buf_io_ctx(struct file *file, struct block_device *bdev,
 		return -EOPNOTSUPP;
 	if (bdev_has_integrity_csum(bdev))
 		return -EOPNOTSUPP;
-	return disk->fops->init_dma_buf_io_ctx(bdev, ctx);
+	ret = disk->fops->init_dma_buf_io_ctx(bdev, ctx);
+	if (!ret)
+		ctx->registered_devt = disk_devt(disk);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(bdev_init_dma_buf_io_ctx);
 
