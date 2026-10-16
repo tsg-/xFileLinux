@@ -325,6 +325,11 @@ xfs_file_read_iter(
 	if (xfs_is_shutdown(mp))
 		return -EIO;
 
+	/* a device mapping can only be read by a direct I/O bio */
+	if (iov_iter_is_dmabuf_map(to) &&
+	    (IS_DAX(inode) || !(iocb->ki_flags & IOCB_DIRECT)))
+		return -EOPNOTSUPP;
+
 	if (IS_DAX(inode))
 		ret = xfs_file_dax_read(iocb, to);
 	else if (iocb->ki_flags & IOCB_DIRECT)
@@ -837,6 +842,11 @@ xfs_file_write_iter(
 	if (xfs_is_shutdown(ip->i_mount))
 		return -EIO;
 
+	/* a device mapping can only be written by a direct I/O bio */
+	if (iov_iter_is_dmabuf_map(from) &&
+	    (IS_DAX(inode) || !(iocb->ki_flags & IOCB_DIRECT)))
+		return -EOPNOTSUPP;
+
 	if (IS_DAX(inode))
 		return xfs_file_dax_write(iocb, from);
 
@@ -850,6 +860,9 @@ xfs_file_write_iter(
 		ret = xfs_file_dio_write(iocb, from);
 		if (ret != -ENOTBLK)
 			return ret;
+		/* the page cache cannot copy from a device mapping */
+		if (iov_iter_is_dmabuf_map(from))
+			return -EOPNOTSUPP;
 	}
 
 	return xfs_file_buffered_write(iocb, from);
@@ -1515,20 +1528,16 @@ xfs_file_init_dma_buf_io_ctx(
 	struct file		*file,
 	struct dma_buf_io_ctx	*ctx)
 {
-	struct inode		*inode = file_inode(file);
-	struct block_device	*bdev = inode->i_sb->s_bdev;
-	struct gendisk		*disk = bdev->bd_disk;
+	struct xfs_inode	*ip = XFS_I(file_inode(file));
 
-	if (xfs_is_shutdown(XFS_I(inode)->i_mount))
+	if (xfs_is_shutdown(ip->i_mount))
 		return -EIO;
 	if (!(file->f_flags & O_DIRECT))
 		return -EINVAL;
 	if (!xfs_file_supports_dma_buf_io(file))
 		return -EOPNOTSUPP;
-	if (!disk->fops->init_dma_buf_io_ctx)
-		return -EOPNOTSUPP;
-
-	return disk->fops->init_dma_buf_io_ctx(bdev, ctx);
+	return iomap_file_init_dma_buf_io_ctx(file,
+			xfs_inode_buftarg(ip)->bt_bdev, ctx);
 }
 
 const struct file_operations xfs_file_operations = {
