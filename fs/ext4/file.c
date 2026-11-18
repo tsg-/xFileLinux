@@ -88,6 +88,8 @@ static ssize_t ext4_dio_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		 * direct I/O path within generic_file_read_iter() is not
 		 * taken.
 		 */
+		if (iov_iter_is_dmabuf_map(to))
+			return -EOPNOTSUPP;
 		iocb->ki_flags &= ~IOCB_DIRECT;
 		return generic_file_read_iter(iocb, to);
 	}
@@ -137,6 +139,11 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 	if (!iov_iter_count(to))
 		return 0; /* skip atime */
+
+	/* a device mapping can only be read by a direct I/O bio */
+	if (iov_iter_is_dmabuf_map(to) &&
+	    (IS_DAX(inode) || !(iocb->ki_flags & IOCB_DIRECT)))
+		return -EOPNOTSUPP;
 
 #ifdef CONFIG_FS_DAX
 	if (IS_DAX(inode))
@@ -547,6 +554,8 @@ static ssize_t ext4_dio_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			inode_unlock_shared(inode);
 		else
 			inode_unlock(inode);
+		if (iov_iter_is_dmabuf_map(from))
+			return -EOPNOTSUPP;
 		return ext4_buffered_write_iter(iocb, from);
 	}
 
@@ -604,6 +613,10 @@ out:
 	if (ret >= 0 && iov_iter_count(from)) {
 		ssize_t err;
 		loff_t endbyte;
+
+		/* the page cache cannot copy from a device mapping */
+		if (iov_iter_is_dmabuf_map(from))
+			return ret ?: -EOPNOTSUPP;
 
 		/*
 		 * There is no support for atomic writes on buffered-io yet,
@@ -702,6 +715,11 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ret = ext4_emergency_state(inode->i_sb);
 	if (unlikely(ret))
 		return ret;
+
+	/* a device mapping can only be written by a direct I/O bio */
+	if (iov_iter_is_dmabuf_map(from) &&
+	    (IS_DAX(inode) || !(iocb->ki_flags & IOCB_DIRECT)))
+		return -EOPNOTSUPP;
 
 #ifdef CONFIG_FS_DAX
 	if (IS_DAX(inode))
