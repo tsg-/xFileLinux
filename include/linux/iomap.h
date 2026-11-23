@@ -12,6 +12,7 @@
 
 struct address_space;
 struct fiemap_extent_info;
+struct file;
 struct inode;
 struct iomap_iter;
 struct iomap_dio;
@@ -410,8 +411,10 @@ struct iomap_dio *__iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 ssize_t iomap_dio_complete(struct iomap_dio *dio);
 void iomap_dio_bio_end_io(struct bio *bio);
 
+int iomap_file_init_dma_buf_io_ctx(struct file *file, struct block_device *bdev,
+				   struct dma_buf_io_ctx *ctx);
+
 #ifdef CONFIG_SWAP
-struct file;
 struct swap_info_struct;
 
 int iomap_swapfile_activate(struct swap_info_struct *sis,

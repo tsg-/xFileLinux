@@ -458,7 +458,13 @@ out:
 static loff_t iomap_dio_hole_iter(const struct iomap_iter *iter,
 		struct iomap_dio *dio)
 {
-	loff_t length = iov_iter_zero(iomap_length(iter), dio->submit.iter);
+	loff_t length;
+
+	/* a device mapping cannot be zeroed from the CPU */
+	if (iov_iter_is_dmabuf_map(dio->submit.iter))
+		return -EOPNOTSUPP;
+
+	length = iov_iter_zero(iomap_length(iter), dio->submit.iter);
 
 	dio->size += length;
 	if (!length)
@@ -475,6 +481,10 @@ static loff_t iomap_dio_inline_iter(const struct iomap_iter *iomi,
 	loff_t length = iomap_length(iomi);
 	loff_t pos = iomi->pos;
 	size_t copied;
+
+	/* inline data is copied from the CPU, which a device mapping bypasses */
+	if (iov_iter_is_dmabuf_map(iter))
+		return -EOPNOTSUPP;
 
 	if (WARN_ON_ONCE(!iomap_inline_data_valid(iomap)))
 		return -EIO;
@@ -767,3 +777,12 @@ iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	return iomap_dio_complete(dio);
 }
 EXPORT_SYMBOL_GPL(iomap_dio_rw);
+
+int iomap_file_init_dma_buf_io_ctx(struct file *file, struct block_device *bdev,
+				   struct dma_buf_io_ctx *ctx)
+{
+	if (IS_DAX(file_inode(file)))
+		return -EOPNOTSUPP;
+	return bdev_init_dma_buf_io_ctx(file, bdev, ctx);
+}
+EXPORT_SYMBOL_GPL(iomap_file_init_dma_buf_io_ctx);
