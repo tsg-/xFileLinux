@@ -425,6 +425,10 @@ static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 	unsigned int alignment;
 	ssize_t ret = 0;
 
+	if (iov_iter_is_dmabuf_map(dio->submit.iter) &&
+	    (iomap->flags & IOMAP_F_INTEGRITY))
+		return -EOPNOTSUPP;
+
 	/*
 	 * File systems that write out of place and always allocate new blocks
 	 * need each bio to be block aligned as that's the unit of allocation.
@@ -589,7 +593,13 @@ out:
 
 static int iomap_dio_hole_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 {
-	loff_t copied = iov_iter_zero(iomap_length(iter), dio->submit.iter);
+	loff_t copied;
+
+	/* a device mapping cannot be zeroed from the CPU */
+	if (iov_iter_is_dmabuf_map(dio->submit.iter))
+		return -EOPNOTSUPP;
+
+	copied = iov_iter_zero(iomap_length(iter), dio->submit.iter);
 
 	if (dio->flags & IOMAP_DIO_FSBLOCK_ALIGNED) {
 		loff_t aligned_copied = round_down(copied,
@@ -618,6 +628,10 @@ static int iomap_dio_inline_iter(struct iomap_iter *iomi, struct iomap_dio *dio)
 	loff_t length = iomap_length(iomi);
 	loff_t pos = iomi->pos;
 	u64 copied;
+
+	/* inline data is copied from the CPU, which a device mapping bypasses */
+	if (iov_iter_is_dmabuf_map(iter))
+		return -EOPNOTSUPP;
 
 	if (WARN_ON_ONCE(!inline_data))
 		return -EIO;
@@ -716,6 +730,10 @@ __iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 
 	if (!iomi.len)
 		return NULL;
+
+	/* bouncing copies the data from the CPU, which a device mapping bypasses */
+	if (iov_iter_is_dmabuf_map(iter) && (dio_flags & IOMAP_DIO_BOUNCE))
+		return ERR_PTR(-EOPNOTSUPP);
 
 	dio = kmalloc_obj(*dio);
 	if (!dio)
@@ -921,6 +939,17 @@ iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
 	return iomap_dio_complete(dio);
 }
 EXPORT_SYMBOL_GPL(iomap_dio_rw);
+
+int iomap_file_init_dma_buf_io_ctx(struct file *file, struct block_device *bdev,
+				   struct dma_buf_io_ctx *ctx)
+{
+	struct inode *inode = file_inode(file);
+
+	if (IS_DAX(inode))
+		return -EOPNOTSUPP;
+	return bdev_init_dma_buf_io_ctx(file, bdev, ctx);
+}
+EXPORT_SYMBOL_GPL(iomap_file_init_dma_buf_io_ctx);
 
 struct iomap_dio_simple {
 	struct kiocb		*iocb;
