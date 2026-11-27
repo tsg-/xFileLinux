@@ -1325,12 +1325,13 @@ rpcrdma_decode_msg(struct rpcrdma_xprt *r_xprt, struct rpcrdma_rep *rep,
 		return -EIO;
 
 	/*
-	 * A dma-buf payload is never copied out of the receive buffer: the
-	 * server must have placed it in the Write chunk, and the inline part
-	 * must fit the head.
+	 * A dma-buf payload is never copied out of the receive buffer, so the
+	 * inline part of the reply must fit the head. A reply without data,
+	 * at EOF or with an error, has an empty Write chunk and is fine; a
+	 * payload the server sent inline is refused when it is decoded.
 	 */
 	if (xdr_buf_is_dmabuf(&rqst->rq_rcv_buf) &&
-	    (!writelist || rpclen > rqst->rq_rcv_buf.head[0].iov_len))
+	    rpclen > rqst->rq_rcv_buf.head[0].iov_len)
 		return -EIO;
 
 	r_xprt->rx_stats.fixup_copy_count +=
