@@ -239,13 +239,34 @@ static ssize_t nfs_direct_extract(struct nfs_direct_req *dreq,
 	return nfs_direct_extract_pages(dreq, iter, size, pos, list);
 }
 
-/*
- * Once the exporter invalidates a dma-buf map, its DMA addresses no longer
- * describe the memory the data came from.
- */
-static bool nfs_direct_dmabuf_dead(const struct nfs_direct_req *dreq)
+/* dma-buf I/O contexts registered on NFS files, by context */
+static DEFINE_XARRAY(nfs_dmabuf_owners);
+
+int nfs_dmabuf_owner_add(struct nfs_dmabuf_owner *owner)
 {
-	return dreq->dmabuf && percpu_ref_is_dying(&dreq->dmabuf->refs);
+	return xa_insert(&nfs_dmabuf_owners, (unsigned long)owner->ctx, owner,
+			 GFP_KERNEL);
+}
+
+void nfs_dmabuf_owner_del(struct nfs_dmabuf_owner *owner)
+{
+	xa_erase(&nfs_dmabuf_owners, (unsigned long)owner->ctx);
+}
+
+/**
+ * nfs_direct_dmabuf_cancelled - test whether a dma-buf request may not send
+ * @dreq: direct request
+ *
+ * True while the exporter is invalidating the dma-buf, so the RPC would keep
+ * the exporter waiting, or once the map is being torn down, so its DMA
+ * addresses no longer describe the memory the data came from.
+ */
+bool nfs_direct_dmabuf_cancelled(const struct nfs_direct_req *dreq)
+{
+	if (!dreq->dmabuf)
+		return false;
+	return (dreq->dmabuf_owner && READ_ONCE(dreq->dmabuf_owner->cancelling)) ||
+	       percpu_ref_is_dying(&dreq->dmabuf->refs);
 }
 
 static bool nfs_direct_match_dmabuf(const struct rpc_task *task,
@@ -545,8 +566,11 @@ ssize_t nfs_file_direct_read(struct kiocb *iocb, struct iov_iter *iter,
 	dreq->inode = inode;
 	dreq->max_count = count;
 	dreq->io_start = iocb->ki_pos;
-	if (iov_iter_is_dmabuf_map(iter))
+	if (iov_iter_is_dmabuf_map(iter)) {
 		dreq->dmabuf = iter->dmabuf_map;
+		dreq->dmabuf_owner = xa_load(&nfs_dmabuf_owners,
+					      (unsigned long)dreq->dmabuf->ctx);
+	}
 	dreq->ctx = get_nfs_open_context(nfs_file_open_context(iocb->ki_filp));
 	l_ctx = nfs_get_lock_context(dreq->ctx);
 	if (IS_ERR(l_ctx)) {
@@ -678,7 +702,7 @@ static void nfs_direct_write_reschedule(struct nfs_direct_req *dreq)
 			      &nfs_direct_write_completion_ops);
 	desc.pg_dreq = dreq;
 
-	if (nfs_direct_dmabuf_dead(dreq)) {
+	if (nfs_direct_dmabuf_cancelled(dreq)) {
 		spin_lock(&dreq->lock);
 		dreq->flags = 0;
 		dreq->error = -ECANCELED;
@@ -1108,8 +1132,11 @@ ssize_t nfs_file_direct_write(struct kiocb *iocb, struct iov_iter *iter,
 	dreq->inode = inode;
 	dreq->max_count = count;
 	dreq->io_start = pos;
-	if (iov_iter_is_dmabuf_map(iter))
+	if (iov_iter_is_dmabuf_map(iter)) {
 		dreq->dmabuf = iter->dmabuf_map;
+		dreq->dmabuf_owner = xa_load(&nfs_dmabuf_owners,
+					      (unsigned long)dreq->dmabuf->ctx);
+	}
 	dreq->ctx = get_nfs_open_context(nfs_file_open_context(iocb->ki_filp));
 	l_ctx = nfs_get_lock_context(dreq->ctx);
 	if (IS_ERR(l_ctx)) {

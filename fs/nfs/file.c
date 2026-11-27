@@ -995,24 +995,27 @@ int nfs_flock(struct file *filp, int cmd, struct file_lock *fl)
 }
 EXPORT_SYMBOL_GPL(nfs_flock);
 
-/* Upper-layer state of a dma-buf I/O context on an NFS file */
-struct nfs_dmabuf_owner {
-	struct nfs_server	*server;
-	struct super_block	*sb;
-	struct dma_buf_io_ctx	*ctx;
-};
-
 static void nfs_dmabuf_cancel(void *data, int error)
 {
 	struct nfs_dmabuf_owner *owner = data;
 
+	/* before the sweep, so an RPC that starts later refuses itself */
+	WRITE_ONCE(owner->cancelling, true);
 	nfs_direct_cancel_dmabuf(owner->server, owner->ctx, error);
+}
+
+static void nfs_dmabuf_resume(void *data)
+{
+	struct nfs_dmabuf_owner *owner = data;
+
+	WRITE_ONCE(owner->cancelling, false);
 }
 
 static void nfs_dmabuf_release(void *data)
 {
 	struct nfs_dmabuf_owner *owner = data;
 
+	nfs_dmabuf_owner_del(owner);
 	nfs_sb_deactive(owner->sb);
 	kfree(owner);
 }
@@ -1037,6 +1040,7 @@ int nfs_file_init_dma_buf_io_ctx(struct file *file, struct dma_buf_io_ctx *ctx)
 	struct nfs_server *server = NFS_SERVER(inode);
 	struct rpc_dma_buf_owner hooks = {
 		.cancel		= nfs_dmabuf_cancel,
+		.resume		= nfs_dmabuf_resume,
 		.release	= nfs_dmabuf_release,
 	};
 	struct nfs_dmabuf_owner *owner;
@@ -1059,6 +1063,12 @@ int nfs_file_init_dma_buf_io_ctx(struct file *file, struct dma_buf_io_ctx *ctx)
 	owner->sb = inode->i_sb;
 	owner->ctx = ctx;
 	hooks.data = owner;
+	ret = nfs_dmabuf_owner_add(owner);
+	if (ret) {
+		nfs_sb_deactive(owner->sb);
+		kfree(owner);
+		return ret;
+	}
 
 	ret = rpc_clnt_init_dma_buf_io_ctx(server->client, ctx, &hooks);
 	if (ret == -ENOTCONN) {
@@ -1074,6 +1084,7 @@ int nfs_file_init_dma_buf_io_ctx(struct file *file, struct dma_buf_io_ctx *ctx)
 		}
 	}
 	if (ret) {
+		nfs_dmabuf_owner_del(owner);
 		nfs_sb_deactive(owner->sb);
 		kfree(owner);
 	}

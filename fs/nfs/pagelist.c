@@ -808,6 +808,19 @@ static void nfs_pgio_prepare(struct rpc_task *task, void *calldata)
 {
 	struct nfs_pgio_header *hdr = calldata;
 	int err;
+
+	if (hdr->args.dmabuf) {
+		/* RFC 8166: no direct placement under a data-touching flavor */
+		if (test_bit(RPCAUTH_AUTH_DATATOUCH,
+			     &task->tk_client->cl_auth->au_flags)) {
+			rpc_exit(task, -EOPNOTSUPP);
+			return;
+		}
+		if (hdr->dreq && nfs_direct_dmabuf_cancelled(hdr->dreq)) {
+			rpc_exit(task, -ECANCELED);
+			return;
+		}
+	}
 	err = NFS_PROTO(hdr->inode)->pgio_rpc_prepare(task, hdr);
 	if (err)
 		rpc_exit(task, err);

@@ -1435,6 +1435,10 @@ void nfs_commit_prepare(struct rpc_task *task, void *calldata)
 {
 	struct nfs_commit_data *data = calldata;
 
+	if (data->dreq && nfs_direct_dmabuf_cancelled(data->dreq)) {
+		rpc_exit(task, -ECANCELED);
+		return;
+	}
 	NFS_PROTO(data->inode)->commit_rpc_prepare(task, data);
 }
 

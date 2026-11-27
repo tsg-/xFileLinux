@@ -32,6 +32,8 @@ static void rpcrdma_dmabuf_invalidate(struct dma_buf_attachment *attach)
 	if (ctx->owner.cancel)
 		ctx->owner.cancel(ctx->owner.data, -ECANCELED);
 	dma_buf_io_invalidate_mappings(base);
+	if (ctx->owner.resume)
+		ctx->owner.resume(ctx->owner.data);
 }
 
 static const struct dma_buf_attach_ops rpcrdma_dmabuf_importer_ops = {

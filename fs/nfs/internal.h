@@ -771,6 +771,18 @@ extern int nfs_sillyrename(struct inode *dir, struct dentry *dentry);
 
 /* direct.c */
 struct dma_buf_io_ctx;
+
+/* NFS state of a dma-buf I/O context registered on an NFS file */
+struct nfs_dmabuf_owner {
+	struct nfs_server	*server;
+	struct super_block	*sb;
+	struct dma_buf_io_ctx	*ctx;
+	bool			cancelling;	/* refuse new RPCs */
+};
+
+int nfs_dmabuf_owner_add(struct nfs_dmabuf_owner *owner);
+void nfs_dmabuf_owner_del(struct nfs_dmabuf_owner *owner);
+bool nfs_direct_dmabuf_cancelled(const struct nfs_direct_req *dreq);
 int nfs_file_init_dma_buf_io_ctx(struct file *file, struct dma_buf_io_ctx *ctx);
 void nfs_direct_cancel_dmabuf(struct nfs_server *server,
 			      const struct dma_buf_io_ctx *ctx, int error);
@@ -1038,6 +1050,7 @@ struct nfs_direct_req {
 				error;		/* any reported error */
 	struct completion	completion;	/* wait for i/o completion */
 	struct dma_buf_io_map	*dmabuf;	/* payload map, dma-buf I/O only */
+	struct nfs_dmabuf_owner	*dmabuf_owner;	/* its registration */
 
 	/* commit state */
 	struct nfs_mds_commit_info mds_cinfo;	/* Storage for cinfo */

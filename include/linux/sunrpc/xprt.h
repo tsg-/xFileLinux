@@ -160,11 +160,14 @@ struct dma_buf_io_ctx;
 /*
  * Upper-layer hooks for a dma-buf I/O context created on a transport.
  * @cancel ends the I/O using the context with @error, so the exporter
- * does not wait on it; it runs with the dma-buf reservation lock held
- * and must not sleep. @release runs once the context is gone.
+ * does not wait on it, and must keep new I/O from starting until
+ * @resume, which follows once an invalidation has drained; a device
+ * removal is never resumed. Both run with the dma-buf reservation
+ * lock held and must not sleep. @release runs once the context is gone.
  */
 struct rpc_dma_buf_owner {
 	void		(*cancel)(void *data, int error);
+	void		(*resume)(void *data);
 	void		(*release)(void *data);
 	void		*data;
 };
