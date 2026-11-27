@@ -26,12 +26,11 @@ static struct dma_buf_io_map *nvme_dma_buf_io_map(struct dma_buf_io_ctx *ctx)
 	unsigned nr_entries = ctx->dmabuf->size / NVME_CTRL_PAGE_SIZE;
 	struct nvme_dma_buf_io_ctx *nvme_ctx = ctx->dev_priv;
 	struct dma_buf_attachment *attach = nvme_ctx->attach;
-	unsigned long tmp, i = 0;
 	struct nvme_dmabuf_map *map;
-	struct scatterlist *sg;
 	struct sg_table *sgt;
 	int ret;
 
+	BUILD_BUG_ON(NVME_CTRL_PAGE_SIZE != DMA_BUF_IO_PAGE_SIZE);
 	dma_resv_assert_held(ctx->dmabuf->resv);
 
 	if (ctx->dmabuf->size % NVME_CTRL_PAGE_SIZE)
@@ -49,21 +48,9 @@ static struct dma_buf_io_map *nvme_dma_buf_io_map(struct dma_buf_io_ctx *ctx)
 		goto err;
 	}
 
-	for_each_sgtable_dma_sg(sgt, sg, tmp) {
-		dma_addr_t dma_addr = sg_dma_address(sg);
-		unsigned long sg_len = sg_dma_len(sg);
-
-		if ((sg_len % NVME_CTRL_PAGE_SIZE) ||
-		    (dma_addr % NVME_CTRL_PAGE_SIZE)) {
-			ret = -EINVAL;
-			goto err;
-		}
-		while (sg_len) {
-			map->dma_list[i++] = dma_addr;
-			dma_addr += NVME_CTRL_PAGE_SIZE;
-			sg_len -= NVME_CTRL_PAGE_SIZE;
-		}
-	}
+	ret = dma_buf_io_fill_dma_list(sgt, map->dma_list, nr_entries);
+	if (ret)
+		goto err;
 
 	ret = dma_buf_io_init_map(ctx, &map->base, sgt);
 	if (ret)

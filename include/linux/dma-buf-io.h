@@ -3,6 +3,10 @@
 #define __DMA_BUF_IO_H__
 
 #include <linux/dma-buf.h>
+#include <linux/sizes.h>
+
+/* granularity of the DMA address tables importers build for a map */
+#define DMA_BUF_IO_PAGE_SIZE	SZ_4K
 
 struct dma_buf_io_ctx;
 struct dma_buf_io_map;
@@ -125,5 +129,7 @@ void dma_buf_io_invalidate_mappings(struct dma_buf_io_ctx *ctx);
 int dma_buf_io_init_map(struct dma_buf_io_ctx *ctx, struct dma_buf_io_map *map,
 			struct sg_table *sgt);
 void dma_buf_io_detach(struct dma_buf_io_ctx *ctx);
+int dma_buf_io_fill_dma_list(struct sg_table *sgt, dma_addr_t *list,
+			     unsigned int nr_entries);
 
 #endif

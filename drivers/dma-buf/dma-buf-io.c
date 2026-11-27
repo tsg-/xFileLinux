@@ -76,6 +76,44 @@ int dma_buf_io_init_map(struct dma_buf_io_ctx *ctx, struct dma_buf_io_map *map,
 }
 EXPORT_SYMBOL_NS_GPL(dma_buf_io_init_map, "DMA_BUF");
 
+/**
+ * dma_buf_io_fill_dma_list - Build a per-page table of DMA addresses.
+ * @sgt:	[in]	DMA-mapped table returned by dma_buf_map_attachment()
+ * @list:	[out]	one address per DMA_BUF_IO_PAGE_SIZE page of the mapping
+ * @nr_entries:	[in]	number of entries in @list
+ *
+ * Importer's helper for turning the scatter-gather table of a map into a
+ * table indexed by page, so a request can find the DMA address of any
+ * offset into the dma-buf without walking the scatterlist.
+ *
+ * Returns 0 on success, or -EINVAL if a segment is not aligned to
+ * DMA_BUF_IO_PAGE_SIZE or the mapping does not cover exactly @nr_entries
+ * pages.
+ */
+int dma_buf_io_fill_dma_list(struct sg_table *sgt, dma_addr_t *list,
+			     unsigned int nr_entries)
+{
+	struct scatterlist *sg;
+	unsigned int i = 0;
+	int tmp;
+
+	for_each_sgtable_dma_sg(sgt, sg, tmp) {
+		dma_addr_t dma_addr = sg_dma_address(sg);
+		unsigned int sg_len = sg_dma_len(sg);
+
+		if (!IS_ALIGNED(dma_addr | sg_len, DMA_BUF_IO_PAGE_SIZE))
+			return -EINVAL;
+		for (; sg_len; sg_len -= DMA_BUF_IO_PAGE_SIZE) {
+			if (i >= nr_entries)
+				return -EINVAL;
+			list[i++] = dma_addr;
+			dma_addr += DMA_BUF_IO_PAGE_SIZE;
+		}
+	}
+	return i == nr_entries ? 0 : -EINVAL;
+}
+EXPORT_SYMBOL_NS_GPL(dma_buf_io_fill_dma_list, "DMA_BUF");
+
 static struct dma_buf_io_map *__dma_buf_io_create_map(struct dma_buf_io_ctx *ctx)
 {
 	struct dma_buf *dmabuf = ctx->dmabuf;
