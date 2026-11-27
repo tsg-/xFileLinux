@@ -207,6 +207,9 @@ int		rpcb_v4_register(struct net *net, const u32 program,
 				 const char *netid);
 void		rpcb_getport_async(struct rpc_task *);
 
+void rpc_prepare_reply_dmabuf(struct rpc_rqst *req, struct dma_buf_io_map *map,
+			      unsigned int base, unsigned int len,
+			      unsigned int hdrsize);
 void rpc_prepare_reply_pages(struct rpc_rqst *req, struct page **pages,
 			     unsigned int base, unsigned int len,
 			     unsigned int hdrsize);

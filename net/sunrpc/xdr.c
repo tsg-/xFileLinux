@@ -1496,6 +1496,25 @@ void xdr_write_pages(struct xdr_stream *xdr, struct page **pages, unsigned int b
 }
 EXPORT_SYMBOL_GPL(xdr_write_pages);
 
+/**
+ * xdr_write_dmabuf - Insert a dma-buf range as the payload of an XDR stream
+ * @xdr: pointer to xdr_stream
+ * @map: dma-buf I/O map holding the payload
+ * @base: offset of the payload into the dma-buf
+ * @len: length of the payload
+ *
+ * Like xdr_write_pages(), but the payload has no pages. Only a transport
+ * that can place it by DMA can send the resulting buffer.
+ */
+void xdr_write_dmabuf(struct xdr_stream *xdr, struct dma_buf_io_map *map,
+		      unsigned int base, unsigned int len)
+{
+	xdr_write_pages(xdr, NULL, base, len);
+	xdr->buf->dmabuf = map;
+	xdr->buf->flags |= XDRBUF_DMABUF;
+}
+EXPORT_SYMBOL_GPL(xdr_write_dmabuf);
+
 static unsigned int xdr_set_iov(struct xdr_stream *xdr, struct kvec *iov,
 				unsigned int base, unsigned int len)
 {
@@ -1535,6 +1554,10 @@ static unsigned int xdr_set_page_base(struct xdr_stream *xdr,
 	unsigned int pgoff;
 	unsigned int pgend;
 	void *kaddr;
+
+	/* a dma-buf payload has no pages to decode from */
+	if (xdr_buf_is_dmabuf(xdr->buf))
+		return 0;
 
 	maxlen = xdr->buf->page_len;
 	if (base >= maxlen)
@@ -1735,6 +1758,29 @@ static void xdr_realign_pages(struct xdr_stream *xdr)
 	}
 }
 
+/*
+ * Moving a dma-buf payload would be a CPU copy of device memory, so refuse
+ * any alignment that needs one: head data past the current position, or
+ * stream data after a payload shorter than the page area.
+ */
+static unsigned int xdr_align_dmabuf(struct xdr_stream *xdr, unsigned int len)
+{
+	struct xdr_buf *buf = xdr->buf;
+	unsigned int nwords = XDR_QUADLEN(len);
+
+	if (buf->head->iov_len > xdr_stream_pos(xdr))
+		return 0;
+	if (nwords > xdr->nwords) {
+		nwords = xdr->nwords;
+		len = nwords << 2;
+	}
+	if (buf->page_len <= len)
+		return buf->page_len;
+	if (nwords < xdr->nwords)
+		return 0;
+	return len;
+}
+
 static unsigned int xdr_align_pages(struct xdr_stream *xdr, unsigned int len)
 {
 	struct xdr_buf *buf = xdr->buf;
@@ -1743,6 +1789,9 @@ static unsigned int xdr_align_pages(struct xdr_stream *xdr, unsigned int len)
 
 	if (xdr->nwords == 0)
 		return 0;
+
+	if (xdr_buf_is_dmabuf(buf))
+		return xdr_align_dmabuf(xdr, len);
 
 	xdr_realign_pages(xdr);
 	if (nwords > xdr->nwords) {

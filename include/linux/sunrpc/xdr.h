@@ -53,18 +53,22 @@ struct xdr_netobj {
  * in a list if anybody wants to make use of NFSv4 COMPOUND
  * operations and/or has a need for scatter/gather involving pages.
  */
+struct dma_buf_io_map;
+
 struct xdr_buf {
 	struct kvec	head[1],	/* RPC header + non-page data */
 			tail[1];	/* Appended after page data */
 
 	struct bio_vec	*bvec;
 	struct page **	pages;		/* Array of pages */
+	struct dma_buf_io_map *dmabuf;	/* Payload map, with XDRBUF_DMABUF */
 	unsigned int	page_base,	/* Start of page data */
 			page_len,	/* Length of page data */
 			flags;		/* Flags for data disposition */
 #define XDRBUF_READ		0x01		/* target of file read */
 #define XDRBUF_WRITE		0x02		/* source of file write */
 #define XDRBUF_SPARSE_PAGES	0x04		/* Page array is sparse */
+#define XDRBUF_DMABUF		0x08		/* Payload is a dma-buf range */
 
 	unsigned int	buflen,		/* Total length of storage buffer */
 			len;		/* Length of XDR encoded message */
@@ -77,10 +81,21 @@ xdr_buf_init(struct xdr_buf *buf, void *start, size_t len)
 	buf->head[0].iov_len = len;
 	buf->tail[0].iov_len = 0;
 	buf->pages = NULL;
+	buf->dmabuf = NULL;
 	buf->page_len = 0;
 	buf->flags = 0;
 	buf->len = 0;
 	buf->buflen = len;
+}
+
+/*
+ * A dma-buf payload is described by @dmabuf, with page_base as the offset
+ * into the dma-buf and page_len as its length. It has no pages, and the CPU
+ * must never copy, move or decode it.
+ */
+static inline bool xdr_buf_is_dmabuf(const struct xdr_buf *buf)
+{
+	return buf->flags & XDRBUF_DMABUF;
 }
 
 /*
@@ -264,6 +279,8 @@ extern void __xdr_commit_encode(struct xdr_stream *xdr);
 extern void xdr_truncate_encode(struct xdr_stream *xdr, size_t len);
 extern void xdr_truncate_decode(struct xdr_stream *xdr, size_t len);
 extern int xdr_restrict_buflen(struct xdr_stream *xdr, int newbuflen);
+void xdr_write_dmabuf(struct xdr_stream *xdr, struct dma_buf_io_map *map,
+		      unsigned int base, unsigned int len);
 extern void xdr_write_pages(struct xdr_stream *xdr, struct page **pages,
 		unsigned int base, unsigned int len);
 extern unsigned int xdr_stream_pos(const struct xdr_stream *xdr);

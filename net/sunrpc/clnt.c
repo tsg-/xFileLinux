@@ -1457,6 +1457,24 @@ void rpc_prepare_reply_pages(struct rpc_rqst *req, struct page **pages,
 }
 EXPORT_SYMBOL_GPL(rpc_prepare_reply_pages);
 
+/**
+ * rpc_prepare_reply_dmabuf - Prepare a reply whose payload lands in a dma-buf
+ * @req: RPC request that is about to be sent
+ * @map: dma-buf I/O map for the payload
+ * @base: offset of the payload into the dma-buf
+ * @len: maximum length of the payload
+ * @hdrsize: size of the upper layer reply header, in 32-bit words
+ */
+void rpc_prepare_reply_dmabuf(struct rpc_rqst *req, struct dma_buf_io_map *map,
+			      unsigned int base, unsigned int len,
+			      unsigned int hdrsize)
+{
+	rpc_prepare_reply_pages(req, NULL, base, len, hdrsize);
+	req->rq_rcv_buf.dmabuf = map;
+	req->rq_rcv_buf.flags |= XDRBUF_DMABUF;
+}
+EXPORT_SYMBOL_GPL(rpc_prepare_reply_dmabuf);
+
 void
 rpc_call_start(struct rpc_task *task)
 {
