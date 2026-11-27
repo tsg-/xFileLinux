@@ -771,6 +771,7 @@ extern int nfs_sillyrename(struct inode *dir, struct dentry *dentry);
 
 /* direct.c */
 struct dma_buf_io_ctx;
+int nfs_file_init_dma_buf_io_ctx(struct file *file, struct dma_buf_io_ctx *ctx);
 void nfs_direct_cancel_dmabuf(struct nfs_server *server,
 			      const struct dma_buf_io_ctx *ctx, int error);
 void nfs_init_cinfo_from_dreq(struct nfs_commit_info *cinfo,

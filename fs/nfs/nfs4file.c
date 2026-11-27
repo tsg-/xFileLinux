@@ -447,6 +447,7 @@ const struct file_operations nfs4_file_operations = {
 	.lock		= nfs_lock,
 	.flock		= nfs_flock,
 	.splice_read	= nfs_file_splice_read,
+	.init_dma_buf_io_ctx = nfs_file_init_dma_buf_io_ctx,
 	.splice_write	= iter_file_splice_write,
 	.check_flags	= nfs_check_flags,
 	.setlease	= nfs4_setlease,

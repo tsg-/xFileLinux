@@ -995,6 +995,92 @@ int nfs_flock(struct file *filp, int cmd, struct file_lock *fl)
 }
 EXPORT_SYMBOL_GPL(nfs_flock);
 
+/* Upper-layer state of a dma-buf I/O context on an NFS file */
+struct nfs_dmabuf_owner {
+	struct nfs_server	*server;
+	struct super_block	*sb;
+	struct dma_buf_io_ctx	*ctx;
+};
+
+static void nfs_dmabuf_cancel(void *data, int error)
+{
+	struct nfs_dmabuf_owner *owner = data;
+
+	nfs_direct_cancel_dmabuf(owner->server, owner->ctx, error);
+}
+
+static void nfs_dmabuf_release(void *data)
+{
+	struct nfs_dmabuf_owner *owner = data;
+
+	nfs_sb_deactive(owner->sb);
+	kfree(owner);
+}
+
+/**
+ * nfs_file_init_dma_buf_io_ctx - set up dma-buf direct I/O on an NFS file
+ * @file: file opened with O_DIRECT
+ * @ctx: context being created by dma_buf_io_ctx_create()
+ *
+ * The dma-buf is attached to the RDMA device of the server's transport, so
+ * READ and WRITE payloads move between the server and the dma-buf by RDMA.
+ * The context pins the superblock, because io_uring drops its reference to
+ * @file before it releases the context.
+ *
+ * Returns -EINVAL without O_DIRECT, -EOPNOTSUPP for anything but a regular
+ * file over NFSv3 or later on a single RDMA transport with an auth flavor
+ * that leaves data untouched, or the error from attaching the dma-buf.
+ */
+int nfs_file_init_dma_buf_io_ctx(struct file *file, struct dma_buf_io_ctx *ctx)
+{
+	struct inode *inode = file_inode(file);
+	struct nfs_server *server = NFS_SERVER(inode);
+	struct rpc_dma_buf_owner hooks = {
+		.cancel		= nfs_dmabuf_cancel,
+		.release	= nfs_dmabuf_release,
+	};
+	struct nfs_dmabuf_owner *owner;
+	int ret;
+
+	if (!(file->f_flags & O_DIRECT))
+		return -EINVAL;
+	if (!S_ISREG(inode->i_mode) ||
+	    server->nfs_client->rpc_ops->version < 3)
+		return -EOPNOTSUPP;
+
+	owner = kzalloc_obj(*owner);
+	if (!owner)
+		return -ENOMEM;
+	if (!nfs_sb_active(inode->i_sb)) {
+		kfree(owner);
+		return -ENODEV;
+	}
+	owner->server = server;
+	owner->sb = inode->i_sb;
+	owner->ctx = ctx;
+	hooks.data = owner;
+
+	ret = rpc_clnt_init_dma_buf_io_ctx(server->client, ctx, &hooks);
+	if (ret == -ENOTCONN) {
+		/* an idle transport has disconnected: reconnect it once */
+		struct rpc_task *task;
+
+		task = rpc_call_null(server->client, NULL,
+				     RPC_TASK_SOFT | RPC_TASK_SOFTCONN);
+		if (!IS_ERR(task)) {
+			rpc_put_task(task);
+			ret = rpc_clnt_init_dma_buf_io_ctx(server->client, ctx,
+							   &hooks);
+		}
+	}
+	if (ret) {
+		nfs_sb_deactive(owner->sb);
+		kfree(owner);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(nfs_file_init_dma_buf_io_ctx);
+
 const struct file_operations nfs_file_operations = {
 	.llseek		= nfs_file_llseek,
 	.read_iter	= nfs_file_read,
@@ -1007,6 +1093,7 @@ const struct file_operations nfs_file_operations = {
 	.lock		= nfs_lock,
 	.flock		= nfs_flock,
 	.splice_read	= nfs_file_splice_read,
+	.init_dma_buf_io_ctx = nfs_file_init_dma_buf_io_ctx,
 	.splice_write	= iter_file_splice_write,
 	.check_flags	= nfs_check_flags,
 	.fop_flags	= FOP_DONTCACHE,
