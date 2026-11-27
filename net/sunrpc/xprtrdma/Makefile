@@ -6,3 +6,4 @@ rpcrdma-y := transport.o rpc_rdma.o verbs.o frwr_ops.o ib_client.o \
 	svc_rdma_sendto.o svc_rdma_recvfrom.o svc_rdma_rw.o \
 	svc_rdma_pcl.o module.o
 rpcrdma-$(CONFIG_SUNRPC_BACKCHANNEL) += backchannel.o
+rpcrdma-$(CONFIG_DMA_SHARED_BUFFER) += dmabuf.o

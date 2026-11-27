@@ -58,6 +58,7 @@
 #include <linux/sunrpc/rpc_rdma.h> 	/* RPC/RDMA protocol */
 #include <linux/sunrpc/xprtrdma.h> 	/* xprt parameters */
 #include <linux/sunrpc/rdma_rn.h>	/* removal notifications */
+#include <linux/dma-buf-io.h>		/* dma-buf I/O contexts */
 
 #define RDMA_RESOLVE_TIMEOUT	(5000)	/* 5 seconds */
 #define RDMA_CONNECT_RETRY_MAX	(2)	/* retries if no listener backlog */
@@ -603,6 +604,38 @@ static inline void rpcrdma_set_xdrlen(struct xdr_buf *xdr, size_t len)
 	xdr->head[0].iov_len = len;
 	xdr->len = len;
 }
+
+/*
+ * dma-buf I/O contexts - xprtrdma/dmabuf.c
+ */
+struct rpcrdma_dmabuf_map {
+	struct dma_buf_io_map	base;
+	struct sg_table		*sgt;
+	unsigned int		nr_entries;
+	dma_addr_t		dma_list[] __counted_by(nr_entries);
+};
+
+static inline struct rpcrdma_dmabuf_map *
+to_rpcrdma_dmabuf_map(struct dma_buf_io_map *map)
+{
+	return container_of(map, struct rpcrdma_dmabuf_map, base);
+}
+
+struct rpcrdma_dmabuf_ctx {
+	struct dma_buf_io_ctx		*base;
+	struct ib_device		*device;	/* attached for, referenced */
+	struct dma_buf_attachment	*attach;
+	struct rpcrdma_notification	rn;
+	struct rpc_dma_buf_owner	owner;
+	struct mutex			lock;	/* attach, removing, releasing */
+	struct completion		removed;
+	bool				removing;
+	bool				releasing;
+};
+
+int xprt_rdma_init_dma_buf_io_ctx(struct rpc_xprt *xprt,
+				  struct dma_buf_io_ctx *base,
+				  const struct rpc_dma_buf_owner *owner);
 
 /* RPC/RDMA module init - xprtrdma/transport.c
  */

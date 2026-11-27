@@ -788,6 +788,9 @@ xprt_rdma_disable_swap(struct rpc_xprt *xprt)
  */
 
 static const struct rpc_xprt_ops xprt_rdma_procs = {
+#if IS_ENABLED(CONFIG_DMA_SHARED_BUFFER)
+	.init_dma_buf_io_ctx	= xprt_rdma_init_dma_buf_io_ctx,
+#endif
 	.reserve_xprt		= xprt_reserve_xprt_cong,
 	.release_xprt		= xprt_release_xprt_cong, /* sunrpc/xprt.c */
 	.alloc_slot		= xprt_rdma_alloc_slot,

@@ -157,6 +157,18 @@ struct xprtsec_parms {
 
 struct dma_buf_io_ctx;
 
+/*
+ * Upper-layer hooks for a dma-buf I/O context created on a transport.
+ * @cancel ends the I/O using the context with @error, so the exporter
+ * does not wait on it; it runs with the dma-buf reservation lock held
+ * and must not sleep. @release runs once the context is gone.
+ */
+struct rpc_dma_buf_owner {
+	void		(*cancel)(void *data, int error);
+	void		(*release)(void *data);
+	void		*data;
+};
+
 struct rpc_xprt_ops {
 	void		(*set_buffer_size)(struct rpc_xprt *xprt, size_t sndsize, size_t rcvsize);
 	int		(*reserve_xprt)(struct rpc_xprt *xprt, struct rpc_task *task);
@@ -197,7 +209,8 @@ struct rpc_xprt_ops {
 				      unsigned int max_reqs);
 	/* set only by transports that can place a dma-buf payload by DMA */
 	int		(*init_dma_buf_io_ctx)(struct rpc_xprt *xprt,
-						struct dma_buf_io_ctx *ctx);
+						struct dma_buf_io_ctx *ctx,
+						const struct rpc_dma_buf_owner *owner);
 };
 
 /*

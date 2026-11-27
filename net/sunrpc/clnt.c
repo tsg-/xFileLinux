@@ -1475,6 +1475,46 @@ void rpc_prepare_reply_dmabuf(struct rpc_rqst *req, struct dma_buf_io_map *map,
 }
 EXPORT_SYMBOL_GPL(rpc_prepare_reply_dmabuf);
 
+/**
+ * rpc_clnt_init_dma_buf_io_ctx - Set up a dma-buf I/O context on a client
+ * @clnt: RPC client the I/O will be issued on
+ * @ctx: context being created by dma_buf_io_ctx_create()
+ * @owner: upper-layer hooks for ending and releasing the context
+ *
+ * Returns -EOPNOTSUPP unless the auth flavor leaves data untouched, the
+ * client has exactly one transport, and that transport can place a dma-buf
+ * payload by DMA. Otherwise returns the transport's result.
+ */
+int rpc_clnt_init_dma_buf_io_ctx(struct rpc_clnt *clnt,
+				 struct dma_buf_io_ctx *ctx,
+				 const struct rpc_dma_buf_owner *owner)
+{
+	struct rpc_xprt_switch *xps;
+	struct rpc_xprt *xprt;
+	int ret = -EOPNOTSUPP;
+
+	/* RFC 8166: no direct data placement under a data-touching GSS flavor */
+	if (test_bit(RPCAUTH_AUTH_DATATOUCH, &clnt->cl_auth->au_flags))
+		return -EOPNOTSUPP;
+
+	rcu_read_lock();
+	xps = rcu_dereference(clnt->cl_xpi.xpi_xpswitch);
+	if (!xps || xps->xps_nxprts != 1) {
+		rcu_read_unlock();
+		return -EOPNOTSUPP;
+	}
+	xprt = xprt_get(rcu_dereference(clnt->cl_xprt));
+	rcu_read_unlock();
+	if (!xprt)
+		return -ENOTCONN;
+
+	if (xprt->ops->init_dma_buf_io_ctx)
+		ret = xprt->ops->init_dma_buf_io_ctx(xprt, ctx, owner);
+	xprt_put(xprt);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(rpc_clnt_init_dma_buf_io_ctx);
+
 void
 rpc_call_start(struct rpc_task *task)
 {
