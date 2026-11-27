@@ -2062,6 +2062,13 @@ rpc_xdr_encode(struct rpc_task *task)
 		return;
 
 	task->tk_status = rpcauth_wrap_req(task, &xdr);
+
+	/* only a transport that places a dma-buf payload by DMA may carry one */
+	if (!task->tk_status &&
+	    (xdr_buf_is_dmabuf(&req->rq_snd_buf) ||
+	     xdr_buf_is_dmabuf(&req->rq_rcv_buf)) &&
+	    !req->rq_xprt->ops->init_dma_buf_io_ctx)
+		task->tk_status = -EOPNOTSUPP;
 }
 
 /*

@@ -155,6 +155,8 @@ struct xprtsec_parms {
 	key_serial_t		privkey_serial;
 };
 
+struct dma_buf_io_ctx;
+
 struct rpc_xprt_ops {
 	void		(*set_buffer_size)(struct rpc_xprt *xprt, size_t sndsize, size_t rcvsize);
 	int		(*reserve_xprt)(struct rpc_xprt *xprt, struct rpc_task *task);
@@ -193,6 +195,9 @@ struct rpc_xprt_ops {
 	void		(*bc_free_rqst)(struct rpc_rqst *rqst);
 	void		(*bc_destroy)(struct rpc_xprt *xprt,
 				      unsigned int max_reqs);
+	/* set only by transports that can place a dma-buf payload by DMA */
+	int		(*init_dma_buf_io_ctx)(struct rpc_xprt *xprt,
+						struct dma_buf_io_ctx *ctx);
 };
 
 /*
