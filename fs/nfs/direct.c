@@ -63,6 +63,8 @@
 #include "fscache.h"
 #include "nfstrace.h"
 
+#include <linux/dma-buf-io.h>
+
 #define NFSDBG_FACILITY		NFSDBG_VFS
 
 static struct kmem_cache *nfs_direct_cachep;
@@ -196,6 +198,85 @@ static ssize_t nfs_direct_extract_pages(struct nfs_direct_req *dreq,
 	return bytes ? bytes : err;
 }
 
+/*
+ * A dma-buf iterator has no pages: describe each DMA_BUF_IO_PAGE_SIZE piece
+ * of it with an nfs_page naming the map and the offset into the dma-buf.
+ * io_uring holds the map until the direct request has completed.
+ */
+static ssize_t nfs_direct_extract_dmabuf(struct nfs_direct_req *dreq,
+					 struct iov_iter *iter, size_t size,
+					 loff_t *pos, struct list_head *list)
+{
+	struct dma_buf_io_map *map = iter->dmabuf_map;
+	size_t bytes = 0;
+
+	size = min(size, iov_iter_count(iter));
+	while (bytes < size) {
+		unsigned int base = iter->iov_offset;
+		unsigned int len = min_t(size_t, size - bytes,
+					 DMA_BUF_IO_PAGE_SIZE -
+					 base % DMA_BUF_IO_PAGE_SIZE);
+		struct nfs_page *req;
+
+		req = nfs_page_create_from_dmabuf(dreq->ctx, map, base, *pos,
+						  len);
+		if (IS_ERR(req))
+			return bytes ? bytes : PTR_ERR(req);
+		list_add_tail(&req->wb_list, list);
+		iov_iter_advance(iter, len);
+		bytes += len;
+		*pos += len;
+	}
+	return bytes;
+}
+
+static ssize_t nfs_direct_extract(struct nfs_direct_req *dreq,
+				  struct iov_iter *iter, size_t size,
+				  loff_t *pos, struct list_head *list)
+{
+	if (iov_iter_is_dmabuf_map(iter))
+		return nfs_direct_extract_dmabuf(dreq, iter, size, pos, list);
+	return nfs_direct_extract_pages(dreq, iter, size, pos, list);
+}
+
+/*
+ * Once the exporter invalidates a dma-buf map, its DMA addresses no longer
+ * describe the memory the data came from.
+ */
+static bool nfs_direct_dmabuf_dead(const struct nfs_direct_req *dreq)
+{
+	return dreq->dmabuf && percpu_ref_is_dying(&dreq->dmabuf->refs);
+}
+
+static bool nfs_direct_match_dmabuf(const struct rpc_task *task,
+				    const void *data)
+{
+	const struct nfs_direct_req *dreq = NULL;
+
+	if (task->tk_ops == &nfs_pgio_common_ops)
+		dreq = ((const struct nfs_pgio_header *)task->tk_calldata)->dreq;
+	else if (task->tk_ops == &nfs_commit_ops)
+		dreq = ((const struct nfs_commit_data *)task->tk_calldata)->dreq;
+	return dreq && dreq->dmabuf && dreq->dmabuf->ctx == data;
+}
+
+/**
+ * nfs_direct_cancel_dmabuf - end the RPCs of direct I/O into a dma-buf
+ * @server: server the I/O was issued to
+ * @ctx: dma-buf I/O context being invalidated or detached
+ * @error: status to end the RPCs with
+ *
+ * Ends every READ, WRITE and COMMIT of a direct request whose payload is in
+ * @ctx, so the exporter does not wait for an RPC stuck on an unreachable
+ * server. Releasing a cancelled RPC invalidates its memory regions before
+ * the direct request can complete. Does not sleep.
+ */
+void nfs_direct_cancel_dmabuf(struct nfs_server *server,
+			      const struct dma_buf_io_ctx *ctx, int error)
+{
+	rpc_cancel_tasks(server->client, error, nfs_direct_match_dmabuf, ctx);
+}
+
 void nfs_init_cinfo_from_dreq(struct nfs_commit_info *cinfo,
 			      struct nfs_direct_req *dreq)
 {
@@ -285,6 +366,10 @@ static void nfs_direct_complete(struct nfs_direct_req *dreq)
 
 	if (dreq->iocb) {
 		long res = (long) dreq->error;
+
+		/* a cancelled dma-buf request that moved nothing can be retried */
+		if (dreq->dmabuf && !dreq->count && res == -ECANCELED)
+			res = -EAGAIN;
 		if (dreq->count != 0) {
 			res = (long) dreq->count;
 			WARN_ON_ONCE(dreq->count < 0);
@@ -315,9 +400,9 @@ static void nfs_direct_read_completion(struct nfs_pgio_header *hdr)
 
 	while (!list_empty(&hdr->pages)) {
 		struct nfs_page *req = nfs_list_entry(hdr->pages.next);
-		struct page *page = req->wb_page;
+		struct page *page = nfs_page_to_page(req, 0);
 
-		if (!PageCompound(page) && bytes < hdr->good_bytes &&
+		if (page && !PageCompound(page) && bytes < hdr->good_bytes &&
 		    (dreq->flags == NFS_ODIRECT_SHOULD_DIRTY))
 			set_page_dirty(page);
 		bytes += req->wb_bytes;
@@ -366,14 +451,14 @@ static ssize_t nfs_direct_read_schedule_iovec(struct nfs_direct_req *dreq,
 	size_t rsize = max_t(size_t, NFS_SERVER(inode)->rsize, PAGE_SIZE);
 	LIST_HEAD(nfs_page_list);
 
-	nfs_pageio_init_read(&desc, dreq->inode, false,
+	nfs_pageio_init_read(&desc, dreq->inode, dreq->dmabuf != NULL,
 			     &nfs_direct_read_completion_ops);
 	get_dreq(dreq);
 	desc.pg_dreq = dreq;
 	inode_dio_begin(inode);
 
 	while (iov_iter_count(iter)) {
-		result = nfs_direct_extract_pages(dreq, iter, rsize, &pos, &nfs_page_list);
+		result = nfs_direct_extract(dreq, iter, rsize, &pos, &nfs_page_list);
 		if (result < 0)
 			break;
 
@@ -460,6 +545,8 @@ ssize_t nfs_file_direct_read(struct kiocb *iocb, struct iov_iter *iter,
 	dreq->inode = inode;
 	dreq->max_count = count;
 	dreq->io_start = iocb->ki_pos;
+	if (iov_iter_is_dmabuf_map(iter))
+		dreq->dmabuf = iter->dmabuf_map;
 	dreq->ctx = get_nfs_open_context(nfs_file_open_context(iocb->ki_filp));
 	l_ctx = nfs_get_lock_context(dreq->ctx);
 	if (IS_ERR(l_ctx)) {
@@ -586,11 +673,20 @@ static void nfs_direct_write_reschedule(struct nfs_direct_req *dreq)
 	nfs_clear_pnfs_ds_commit_verifiers(&dreq->ds_cinfo);
 	get_dreq(dreq);
 
-	nfs_pageio_init_write(&desc, dreq->inode, FLUSH_STABLE, false,
+	nfs_pageio_init_write(&desc, dreq->inode, FLUSH_STABLE,
+			      dreq->dmabuf != NULL,
 			      &nfs_direct_write_completion_ops);
 	desc.pg_dreq = dreq;
 
-	while (!list_empty(&reqs)) {
+	if (nfs_direct_dmabuf_dead(dreq)) {
+		spin_lock(&dreq->lock);
+		dreq->flags = 0;
+		dreq->error = -ECANCELED;
+		spin_unlock(&dreq->lock);
+		desc.pg_error = -ECANCELED;
+	}
+
+	while (!desc.pg_error && !list_empty(&reqs)) {
 		req = nfs_list_entry(reqs.next);
 		/* Bump the transmission count */
 		req->wb_nio++;
@@ -885,7 +981,7 @@ static ssize_t nfs_direct_write_schedule_iovec(struct nfs_direct_req *dreq,
 
 	trace_nfs_direct_write_schedule_iovec(dreq);
 
-	nfs_pageio_init_write(&desc, inode, ioflags, false,
+	nfs_pageio_init_write(&desc, inode, ioflags, dreq->dmabuf != NULL,
 			      &nfs_direct_write_completion_ops);
 	desc.pg_dreq = dreq;
 	get_dreq(dreq);
@@ -893,7 +989,7 @@ static ssize_t nfs_direct_write_schedule_iovec(struct nfs_direct_req *dreq,
 
 	NFS_I(inode)->write_io += iov_iter_count(iter);
 	while (iov_iter_count(iter)) {
-		result = nfs_direct_extract_pages(dreq, iter, wsize, &pos, &nfs_page_list);
+		result = nfs_direct_extract(dreq, iter, wsize, &pos, &nfs_page_list);
 		if (result < 0)
 			break;
 
@@ -1012,6 +1108,8 @@ ssize_t nfs_file_direct_write(struct kiocb *iocb, struct iov_iter *iter,
 	dreq->inode = inode;
 	dreq->max_count = count;
 	dreq->io_start = pos;
+	if (iov_iter_is_dmabuf_map(iter))
+		dreq->dmabuf = iter->dmabuf_map;
 	dreq->ctx = get_nfs_open_context(nfs_file_open_context(iocb->ki_filp));
 	l_ctx = nfs_get_lock_context(dreq->ctx);
 	if (IS_ERR(l_ctx)) {

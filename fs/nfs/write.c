@@ -54,7 +54,6 @@ struct nfs_io_completion {
  * Local function declarations
  */
 static void nfs_redirty_request(struct nfs_page *req);
-static const struct rpc_call_ops nfs_commit_ops;
 static const struct nfs_pgio_completion_ops nfs_async_write_completion_ops;
 static const struct nfs_commit_completion_ops nfs_commit_completion_ops;
 static const struct nfs_rw_ops nfs_rw_write_ops;
@@ -1865,7 +1864,7 @@ static void nfs_commit_release(void *calldata)
 	nfs_commitdata_release(calldata);
 }
 
-static const struct rpc_call_ops nfs_commit_ops = {
+const struct rpc_call_ops nfs_commit_ops = {
 	.rpc_call_prepare = nfs_commit_prepare,
 	.rpc_call_done = nfs_commit_done,
 	.rpc_release = nfs_commit_release,

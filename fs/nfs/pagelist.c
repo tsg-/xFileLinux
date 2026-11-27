@@ -31,7 +31,6 @@
 #define NFSDBG_FACILITY		NFSDBG_PAGECACHE
 
 static struct kmem_cache *nfs_page_cachep;
-static const struct rpc_call_ops nfs_pgio_common_ops;
 
 struct nfs_page_iter_page {
 	const struct nfs_page *req;
@@ -1079,7 +1078,8 @@ static int nfs_generic_pg_pgios(struct nfs_pageio_descriptor *desc)
 	if (ret == 0) {
 		struct nfs_client *clp = NFS_SERVER(hdr->inode)->nfs_client;
 
-		struct nfsd_file *localio =
+		/* LOCALIO goes through pages, which a dma-buf payload lacks */
+		struct nfsd_file *localio = hdr->args.dmabuf ? NULL :
 			nfs_local_open_fh(clp, hdr->cred, hdr->args.fh,
 					  &hdr->args.context->nfl,
 					  hdr->args.context->mode);
@@ -1605,7 +1605,7 @@ void nfs_destroy_nfspagecache(void)
 	kmem_cache_destroy(nfs_page_cachep);
 }
 
-static const struct rpc_call_ops nfs_pgio_common_ops = {
+const struct rpc_call_ops nfs_pgio_common_ops = {
 	.rpc_call_prepare = nfs_pgio_prepare,
 	.rpc_call_done = nfs_pgio_result,
 	.rpc_release = nfs_pgio_release,

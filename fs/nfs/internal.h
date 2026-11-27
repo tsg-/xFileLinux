@@ -293,6 +293,7 @@ extern const struct svc_version nfs4_callback_version4;
 extern struct file_system_type nfs_fs_type;
 
 /* pagelist.c */
+extern const struct rpc_call_ops nfs_pgio_common_ops;
 extern int __init nfs_init_nfspagecache(void);
 extern void nfs_destroy_nfspagecache(void);
 extern int __init nfs_init_readpagecache(void);
@@ -624,6 +625,7 @@ int  nfs_show_stats(struct seq_file *, struct dentry *);
 int  nfs_reconfigure(struct fs_context *);
 
 /* write.c */
+extern const struct rpc_call_ops nfs_commit_ops;
 extern void nfs_pageio_init_write(struct nfs_pageio_descriptor *pgio,
 			struct inode *inode, int ioflags, bool force_mds,
 			const struct nfs_pgio_completion_ops *compl_ops);
@@ -768,6 +770,9 @@ nfs_async_rename(struct inode *old_dir, struct inode *new_dir,
 extern int nfs_sillyrename(struct inode *dir, struct dentry *dentry);
 
 /* direct.c */
+struct dma_buf_io_ctx;
+void nfs_direct_cancel_dmabuf(struct nfs_server *server,
+			      const struct dma_buf_io_ctx *ctx, int error);
 void nfs_init_cinfo_from_dreq(struct nfs_commit_info *cinfo,
 			      struct nfs_direct_req *dreq);
 extern ssize_t nfs_dreq_bytes_left(struct nfs_direct_req *dreq, loff_t offset);
@@ -1031,6 +1036,7 @@ struct nfs_direct_req {
 				max_count,	/* max expected count */
 				error;		/* any reported error */
 	struct completion	completion;	/* wait for i/o completion */
+	struct dma_buf_io_map	*dmabuf;	/* payload map, dma-buf I/O only */
 
 	/* commit state */
 	struct nfs_mds_commit_info mds_cinfo;	/* Storage for cinfo */
