@@ -388,9 +388,14 @@ static void nfs_direct_complete(struct nfs_direct_req *dreq)
 	if (dreq->iocb) {
 		long res = (long) dreq->error;
 
-		/* a cancelled dma-buf request that moved nothing can be retried */
-		if (dreq->dmabuf && !dreq->count && res == -ECANCELED)
-			res = -EAGAIN;
+		if (dreq->dmabuf && !dreq->count) {
+			/* a cancelled request that moved nothing can be retried */
+			if (res == -ECANCELED)
+				res = -EAGAIN;
+			/* io_uring reissues on -EOPNOTSUPP: a refusal is final */
+			else if (res == -EOPNOTSUPP)
+				res = -EIO;
+		}
 		if (dreq->count != 0) {
 			res = (long) dreq->count;
 			WARN_ON_ONCE(dreq->count < 0);
