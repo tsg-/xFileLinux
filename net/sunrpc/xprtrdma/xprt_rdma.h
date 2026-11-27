@@ -636,6 +636,15 @@ struct rpcrdma_dmabuf_ctx {
 int xprt_rdma_init_dma_buf_io_ctx(struct rpc_xprt *xprt,
 				  struct dma_buf_io_ctx *base,
 				  const struct rpc_dma_buf_owner *owner);
+#if IS_ENABLED(CONFIG_DMA_SHARED_BUFFER)
+int rpcrdma_dmabuf_check(const struct xdr_buf *buf, struct ib_device *device);
+#else
+static inline int rpcrdma_dmabuf_check(const struct xdr_buf *buf,
+				       struct ib_device *device)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 
 /* RPC/RDMA module init - xprtrdma/transport.c
  */

@@ -798,6 +798,41 @@ out_nosc:
 	return ret;
 }
 
+/*
+ * A dma-buf payload must be placed by RDMA and never copied by the CPU, so
+ * it always travels alone in a Read or Write chunk, and only on the device
+ * its buffer was attached for.
+ */
+static int rpcrdma_marshal_dmabuf(struct rpcrdma_xprt *r_xprt,
+				  const struct rpc_rqst *rqst, bool ddp_allowed)
+{
+	const struct xdr_buf *snd = &rqst->rq_snd_buf;
+	const struct xdr_buf *rcv = &rqst->rq_rcv_buf;
+	struct rpcrdma_ep *ep = r_xprt->rx_ep;
+	int ret;
+
+	if (!ddp_allowed)
+		return -EOPNOTSUPP;
+	if (xdr_buf_is_dmabuf(rcv)) {
+		if (!(rcv->flags & XDRBUF_READ) ||
+		    !rpcrdma_nonpayload_inline(r_xprt, rqst))
+			return -EOPNOTSUPP;
+		ret = rpcrdma_dmabuf_check(rcv, ep->re_id->device);
+		if (ret)
+			return ret;
+	}
+	if (xdr_buf_is_dmabuf(snd)) {
+		if (!(snd->flags & XDRBUF_WRITE) ||
+		    snd->head[0].iov_len + snd->tail[0].iov_len >
+		    ep->re_max_inline_send)
+			return -EOPNOTSUPP;
+		ret = rpcrdma_dmabuf_check(snd, ep->re_id->device);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 /**
  * rpcrdma_marshal_req - Marshal and send one RPC request
  * @r_xprt: controlling transport
@@ -854,6 +889,13 @@ rpcrdma_marshal_req(struct rpcrdma_xprt *r_xprt, struct rpc_rqst *rqst)
 	ddp_allowed = !test_bit(RPCAUTH_AUTH_DATATOUCH,
 				&rqst->rq_cred->cr_auth->au_flags);
 
+	if (xdr_buf_is_dmabuf(&rqst->rq_snd_buf) ||
+	    xdr_buf_is_dmabuf(&rqst->rq_rcv_buf)) {
+		ret = rpcrdma_marshal_dmabuf(r_xprt, rqst, ddp_allowed);
+		if (ret)
+			goto out_err;
+	}
+
 	/*
 	 * Chunks needed for results?
 	 *
@@ -863,7 +905,9 @@ rpcrdma_marshal_req(struct rpcrdma_xprt *r_xprt, struct rpc_rqst *rqst)
 	 *   inline.
 	 * o Large non-read ops return as a single reply chunk.
 	 */
-	if (rpcrdma_results_inline(r_xprt, rqst))
+	if (xdr_buf_is_dmabuf(&rqst->rq_rcv_buf))
+		wtype = rpcrdma_writech;
+	else if (rpcrdma_results_inline(r_xprt, rqst))
 		wtype = rpcrdma_noch;
 	else if ((ddp_allowed && rqst->rq_rcv_buf.flags & XDRBUF_READ) &&
 		 rpcrdma_nonpayload_inline(r_xprt, rqst))
@@ -885,7 +929,10 @@ rpcrdma_marshal_req(struct rpcrdma_xprt *r_xprt, struct rpc_rqst *rqst)
 	 * that both has a data payload, and whose non-data arguments
 	 * by themselves are larger than the inline threshold.
 	 */
-	if (rpcrdma_args_inline(r_xprt, rqst)) {
+	if (xdr_buf_is_dmabuf(buf)) {
+		*p++ = rdma_msg;
+		rtype = rpcrdma_readch;
+	} else if (rpcrdma_args_inline(r_xprt, rqst)) {
 		*p++ = rdma_msg;
 		rtype = buf->len < rdmab_length(req->rl_sendbuf) ?
 			rpcrdma_noch_pullup : rpcrdma_noch_mapped;
@@ -1266,6 +1313,15 @@ rpcrdma_decode_msg(struct rpcrdma_xprt *r_xprt, struct rpcrdma_rep *rep,
 	if (writelist)
 		rpclen &= ~3;
 	if (unlikely(!rpclen))
+		return -EIO;
+
+	/*
+	 * A dma-buf payload is never copied out of the receive buffer: the
+	 * server must have placed it in the Write chunk, and the inline part
+	 * must fit the head.
+	 */
+	if (xdr_buf_is_dmabuf(&rqst->rq_rcv_buf) &&
+	    (!writelist || rpclen > rqst->rq_rcv_buf.head[0].iov_len))
 		return -EIO;
 
 	r_xprt->rx_stats.fixup_copy_count +=

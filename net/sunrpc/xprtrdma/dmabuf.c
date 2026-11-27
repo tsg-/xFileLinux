@@ -154,6 +154,31 @@ static const struct dma_buf_io_ops rpcrdma_dmabuf_io_ops = {
 };
 
 /**
+ * rpcrdma_dmabuf_check - check a dma-buf payload can be placed on a device
+ * @buf: xdr_buf carrying a dma-buf payload
+ * @device: device the payload is about to be registered on
+ *
+ * Returns 0, -EOPNOTSUPP if the map was not created by xprtrdma, -EXDEV if
+ * its buffer was attached for another device, or -EINVAL if the payload
+ * lies outside the buffer.
+ */
+int rpcrdma_dmabuf_check(const struct xdr_buf *buf, struct ib_device *device)
+{
+	struct dma_buf_io_map *base = buf->dmabuf;
+	struct rpcrdma_dmabuf_ctx *ctx;
+
+	if (!base || base->ctx->dev_ops != &rpcrdma_dmabuf_io_ops)
+		return -EOPNOTSUPP;
+	ctx = base->ctx->dev_priv;
+	if (ctx->device != device)
+		return -EXDEV;
+	if ((u64)buf->page_base + buf->page_len >
+	    (u64)to_rpcrdma_dmabuf_map(base)->nr_entries * DMA_BUF_IO_PAGE_SIZE)
+		return -EINVAL;
+	return 0;
+}
+
+/**
  * xprt_rdma_init_dma_buf_io_ctx - attach a dma-buf for direct data placement
  * @xprt: transport the I/O will be sent on
  * @base: context being created by dma_buf_io_ctx_create()

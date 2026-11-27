@@ -272,6 +272,54 @@ int frwr_query_device(struct rpcrdma_ep *ep, const struct ib_device *device)
 	return 0;
 }
 
+/*
+ * A dma-buf payload is already mapped for the device: fill the MR's
+ * scatterlist from the map's DMA address table, one entry per
+ * DMA_BUF_IO_PAGE_SIZE page, and map nothing. The marshalling puts such a
+ * payload alone in its chunk, so the cursor covers only the page area.
+ * Returns the number of entries, or a negative errno.
+ */
+static int frwr_map_dmabuf(struct rpcrdma_xprt *r_xprt,
+			   struct rpcrdma_xdr_cursor *cur, bool writing,
+			   struct rpcrdma_mr *mr)
+{
+	const struct xdr_buf *xdrbuf = cur->xc_buf;
+	const struct rpcrdma_dmabuf_map *map =
+		to_rpcrdma_dmabuf_map(xdrbuf->dmabuf);
+	unsigned int max_depth = r_xprt->rx_ep->re_max_fr_depth;
+	unsigned int offset, remaining;
+	int i = 0;
+
+	if (WARN_ON_ONCE(!(cur->xc_flags & XC_HEAD_DONE) ||
+			 !(cur->xc_flags & XC_TAIL_DONE)))
+		return -EIO;
+
+	offset = xdrbuf->page_base + cur->xc_page_offset;
+	remaining = xdrbuf->page_len - cur->xc_page_offset;
+	while (remaining && i < max_depth) {
+		unsigned int pgoff = offset % DMA_BUF_IO_PAGE_SIZE;
+		unsigned int len = min_t(unsigned int, remaining,
+					 DMA_BUF_IO_PAGE_SIZE - pgoff);
+		struct scatterlist *sg = &mr->mr_sg[i++];
+
+		sg_dma_address(sg) =
+			map->dma_list[offset / DMA_BUF_IO_PAGE_SIZE] + pgoff;
+		sg_dma_len(sg) = len;
+		sg->length = len;
+		offset += len;
+		remaining -= len;
+		cur->xc_page_offset += len;
+	}
+	if (!remaining)
+		cur->xc_flags |= XC_PAGES_DONE;
+
+	mr->mr_dir = rpcrdma_data_dir(writing);
+	mr->mr_nents = i;
+	/* nothing for frwr_mr_unmap() to undo */
+	mr->mr_device = NULL;
+	return i;
+}
+
 /**
  * frwr_map - Register a memory region from an xdr_buf cursor
  * @r_xprt: controlling transport
@@ -295,12 +343,21 @@ int frwr_map(struct rpcrdma_xprt *r_xprt,
 	const struct xdr_buf *xdrbuf = cur->xc_buf;
 	bool sg_gaps = ep->re_mrtype == IB_MR_TYPE_SG_GAPS;
 	unsigned int max_depth = ep->re_max_fr_depth;
+	unsigned int page_size = PAGE_SIZE;
 	struct ib_reg_wr *reg_wr;
 	int i, n, dma_nents;
 	struct ib_mr *ibmr;
 	u8 key;
 
 	i = 0;
+
+	if (xdr_buf_is_dmabuf(xdrbuf)) {
+		dma_nents = frwr_map_dmabuf(r_xprt, cur, writing, mr);
+		if (dma_nents <= 0)
+			return dma_nents ?: -EIO;
+		page_size = DMA_BUF_IO_PAGE_SIZE;
+		goto map_mr;
+	}
 
 	/* Head kvec */
 	if (!(cur->xc_flags & XC_HEAD_DONE)) {
@@ -390,8 +447,9 @@ finish:
 		goto out_dmamap_err;
 	mr->mr_device = ep->re_id->device;
 
+map_mr:
 	ibmr = mr->mr_ibmr;
-	n = ib_map_mr_sg(ibmr, mr->mr_sg, dma_nents, NULL, PAGE_SIZE);
+	n = ib_map_mr_sg(ibmr, mr->mr_sg, dma_nents, NULL, page_size);
 	if (n != dma_nents)
 		goto out_mapmr_err;
 
