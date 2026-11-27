@@ -943,8 +943,12 @@ static void nfs3_xdr_enc_read3args(struct rpc_rqst *req,
 					     NFS3_readres_sz - NFS3_pagepad_sz;
 
 	encode_read3args(xdr, args);
-	rpc_prepare_reply_pages(req, args->pages, args->pgbase,
-				args->count, replen);
+	if (args->dmabuf)
+		rpc_prepare_reply_dmabuf(req, args->dmabuf, args->pgbase,
+					 args->count, replen);
+	else
+		rpc_prepare_reply_pages(req, args->pages, args->pgbase,
+					args->count, replen);
 	req->rq_rcv_buf.flags |= XDRBUF_READ;
 }
 
@@ -977,7 +981,10 @@ static void encode_write3args(struct xdr_stream *xdr,
 	*p++ = cpu_to_be32(args->count);
 	*p++ = cpu_to_be32(args->stable);
 	*p = cpu_to_be32(args->count);
-	xdr_write_pages(xdr, args->pages, args->pgbase, args->count);
+	if (args->dmabuf)
+		xdr_write_dmabuf(xdr, args->dmabuf, args->pgbase, args->count);
+	else
+		xdr_write_pages(xdr, args->pages, args->pgbase, args->count);
 }
 
 static void nfs3_xdr_enc_write3args(struct rpc_rqst *req,

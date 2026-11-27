@@ -675,6 +675,8 @@ struct nfs_writeverf {
 /*
  * Arguments shared by the read and write call.
  */
+struct dma_buf_io_map;
+
 struct nfs_pgio_args {
 	struct nfs4_sequence_args	seq_args;
 	struct nfs_fh *		fh;
@@ -685,6 +687,7 @@ struct nfs_pgio_args {
 	__u32			count;
 	unsigned int		pgbase;
 	struct page **		pages;
+	struct dma_buf_io_map *	dmabuf;		/* payload, instead of pages */
 	union {
 		unsigned int		replen;			/* used by read */
 		struct {

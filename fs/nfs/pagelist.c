@@ -466,6 +466,38 @@ struct nfs_page *nfs_page_create_from_page(struct nfs_open_context *ctx,
 }
 
 /**
+ * nfs_page_create_from_dmabuf - Create an NFS direct request for a dma-buf range
+ * @ctx: open context to use
+ * @map: dma-buf I/O map holding the payload
+ * @base: offset of the request's data into the dma-buf
+ * @offset: file offset for the read or write
+ * @count: number of bytes to read or write
+ *
+ * The request has no page; the caller keeps @map referenced until the request
+ * has completed.
+ */
+struct nfs_page *nfs_page_create_from_dmabuf(struct nfs_open_context *ctx,
+					     struct dma_buf_io_map *map,
+					     unsigned int base, loff_t offset,
+					     unsigned int count)
+{
+	struct nfs_lock_context *l_ctx = nfs_get_lock_context(ctx);
+	struct nfs_page *ret;
+
+	if (IS_ERR(l_ctx))
+		return ERR_CAST(l_ctx);
+	ret = nfs_page_create(l_ctx, base, offset >> PAGE_SHIFT,
+			      offset_in_page(offset), count);
+	if (!IS_ERR(ret)) {
+		ret->wb_dmabuf = map;
+		set_bit(PG_DMABUF, &ret->wb_flags);
+		nfs_page_group_init(ret, NULL);
+	}
+	nfs_put_lock_context(l_ctx);
+	return ret;
+}
+
+/**
  * nfs_page_create_from_folio - Create an NFS read/write request.
  * @ctx: open context to use
  * @folio: folio to write
@@ -514,7 +546,10 @@ nfs_create_subreq(struct nfs_page *req,
 	ret = nfs_page_create(req->wb_lock_context, pgbase, req->wb_index,
 			      offset, count);
 	if (!IS_ERR(ret)) {
-		if (folio)
+		if (nfs_page_is_dmabuf(req)) {
+			ret->wb_dmabuf = req->wb_dmabuf;
+			set_bit(PG_DMABUF, &ret->wb_flags);
+		} else if (folio)
 			nfs_page_assign_folio(ret, folio,
 					      test_bit(PG_PINNED, &req->wb_flags));
 		else
@@ -566,11 +601,14 @@ void nfs_unlock_and_release_request(struct nfs_page *req)
 static void nfs_clear_request(struct nfs_page *req)
 {
 	struct folio *folio = nfs_page_to_folio(req);
-	struct page *page = req->wb_page;
+	struct page *page = nfs_page_to_page(req, 0);
 	struct nfs_lock_context *l_ctx = req->wb_lock_context;
 	struct nfs_open_context *ctx;
 
-	if (folio != NULL) {
+	if (nfs_page_is_dmabuf(req)) {
+		req->wb_dmabuf = NULL;
+		clear_bit(PG_DMABUF, &req->wb_flags);
+	} else if (folio != NULL) {
 		if (test_and_clear_bit(PG_PINNED, &req->wb_flags)) {
 			if (req->wb_nr_pinned > 0)
 				unpin_user_folio(folio, req->wb_nr_pinned);
@@ -918,6 +956,36 @@ static void nfs_pgio_result(struct rpc_task *task, void *calldata)
  * This is the case if nfs_updatepage detects a conflicting request
  * that has been written but not committed.
  */
+/*
+ * A dma-buf payload has no pages: move the requests to the header and
+ * describe the payload by its map and its offset into the dma-buf.
+ */
+static int nfs_generic_pgio_dmabuf(struct nfs_pageio_descriptor *desc,
+				   struct nfs_pgio_header *hdr)
+{
+	struct nfs_pgio_mirror *mirror = nfs_pgio_current_mirror(desc);
+	struct list_head *head = &mirror->pg_list;
+	struct dma_buf_io_map *map = nfs_list_entry(head->next)->wb_dmabuf;
+	struct nfs_commit_info cinfo;
+
+	hdr->page_array.npages = 0;
+	hdr->page_array.pagevec = hdr->page_array.page_array;
+	nfs_init_cinfo(&cinfo, desc->pg_inode, desc->pg_dreq);
+	while (!list_empty(head))
+		nfs_list_move_request(nfs_list_entry(head->next), &hdr->pages);
+
+	if ((desc->pg_ioflags & FLUSH_COND_STABLE) &&
+	    (desc->pg_moreio || nfs_reqs_to_commit(&cinfo)))
+		desc->pg_ioflags &= ~FLUSH_COND_STABLE;
+
+	nfs_pgio_rpcsetup(hdr, mirror->pg_base, mirror->pg_count,
+			  desc->pg_ioflags, &cinfo);
+	hdr->args.pages = NULL;
+	hdr->args.dmabuf = map;
+	desc->pg_rpc_callops = &nfs_pgio_common_ops;
+	return 0;
+}
+
 int nfs_generic_pgio(struct nfs_pageio_descriptor *desc,
 		     struct nfs_pgio_header *hdr)
 {
@@ -932,6 +1000,9 @@ int nfs_generic_pgio(struct nfs_pageio_descriptor *desc,
 	unsigned int pagecount, pageused;
 	unsigned int pg_base = offset_in_page(mirror->pg_base);
 	gfp_t gfp_flags = nfs_io_gfp_mask();
+
+	if (!list_empty(head) && nfs_page_is_dmabuf(nfs_list_entry(head->next)))
+		return nfs_generic_pgio_dmabuf(desc, hdr);
 
 	pagecount = nfs_page_array_len(pg_base, mirror->pg_count);
 	pg_array->npages = pagecount;
@@ -1097,6 +1168,10 @@ static bool nfs_page_is_contiguous(const struct nfs_page *prev,
 
 	if (req_offset(req) != req_offset(prev) + prev->wb_bytes)
 		return false;
+	if (nfs_page_is_dmabuf(prev) || nfs_page_is_dmabuf(req))
+		return nfs_page_is_dmabuf(prev) && nfs_page_is_dmabuf(req) &&
+		       req->wb_dmabuf == prev->wb_dmabuf &&
+		       req->wb_pgbase == prev_end;
 	if (req->wb_pgbase == 0)
 		return prev_end == nfs_page_max_length(prev);
 	if (req->wb_pgbase == prev_end) {

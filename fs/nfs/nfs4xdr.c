@@ -1805,7 +1805,10 @@ static void encode_write(struct xdr_stream *xdr, const struct nfs_pgio_args *arg
 	*p++ = cpu_to_be32(args->stable);
 	*p = cpu_to_be32(args->count);
 
-	xdr_write_pages(xdr, args->pages, args->pgbase, args->count);
+	if (args->dmabuf)
+		xdr_write_dmabuf(xdr, args->dmabuf, args->pgbase, args->count);
+	else
+		xdr_write_pages(xdr, args->pages, args->pgbase, args->count);
 }
 
 static void encode_delegreturn(struct xdr_stream *xdr, const nfs4_stateid *stateid, struct compound_hdr *hdr)
@@ -2618,8 +2621,12 @@ static void nfs4_xdr_enc_read(struct rpc_rqst *req, struct xdr_stream *xdr,
 	encode_putfh(xdr, args->fh, &hdr);
 	encode_read(xdr, args, &hdr);
 
-	rpc_prepare_reply_pages(req, args->pages, args->pgbase,
-				args->count, hdr.replen - pagepad_maxsz);
+	if (args->dmabuf)
+		rpc_prepare_reply_dmabuf(req, args->dmabuf, args->pgbase,
+					 args->count, hdr.replen - pagepad_maxsz);
+	else
+		rpc_prepare_reply_pages(req, args->pages, args->pgbase,
+					args->count, hdr.replen - pagepad_maxsz);
 	req->rq_rcv_buf.flags |= XDRBUF_READ;
 	encode_nops(&hdr);
 }

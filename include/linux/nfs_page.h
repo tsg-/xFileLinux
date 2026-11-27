@@ -39,13 +39,16 @@ enum {
 	PG_CONTENDED1,		/* Is someone waiting for a lock? */
 	PG_CONTENDED2,		/* Is someone waiting for a lock? */
 	PG_PINNED,		/* page is pinned by GUP */
+	PG_DMABUF,		/* payload is a dma-buf range, no page */
 };
 
 struct nfs_inode;
+struct dma_buf_io_map;
 struct nfs_page {
 	struct list_head	wb_list;	/* Defines state of page: */
 	union {
 		struct page	*wb_page;	/* page to read in/write out */
+		struct dma_buf_io_map *wb_dmabuf; /* PG_DMABUF; wb_pgbase is the offset */
 		struct folio	*wb_folio;
 	};
 	struct nfs_lock_context	*wb_lock_context;	/* lock context info */
@@ -125,6 +128,10 @@ struct nfs_pageio_descriptor {
 /* arbitrarily selected limit to number of mirrors */
 #define NFS_PAGEIO_DESCRIPTOR_MIRROR_MAX 16
 
+struct nfs_page *nfs_page_create_from_dmabuf(struct nfs_open_context *ctx,
+					     struct dma_buf_io_map *map,
+					     unsigned int base, loff_t offset,
+					     unsigned int count);
 extern struct nfs_page *nfs_page_create_from_page(struct nfs_open_context *ctx,
 						  struct page *page,
 						  bool pinned,
@@ -169,6 +176,18 @@ extern void nfs_page_clear_headlock(struct nfs_page *req);
 extern bool nfs_async_iocounter_wait(struct rpc_task *, struct nfs_lock_context *);
 
 /**
+ * nfs_page_is_dmabuf - Test whether a request's payload is a dma-buf range
+ * @req: pointer to a struct nfs_page
+ *
+ * Such a request has no page or folio: wb_dmabuf names the dma-buf I/O map
+ * and wb_pgbase is the offset of the request's data into the dma-buf.
+ */
+static inline bool nfs_page_is_dmabuf(const struct nfs_page *req)
+{
+	return test_bit(PG_DMABUF, &req->wb_flags);
+}
+
+/**
  * nfs_page_to_folio - Retrieve a struct folio for the request
  * @req: pointer to a struct nfs_page
  *
@@ -195,6 +214,8 @@ static inline struct page *nfs_page_to_page(const struct nfs_page *req,
 {
 	struct folio *folio = nfs_page_to_folio(req);
 
+	if (nfs_page_is_dmabuf(req))
+		return NULL;
 	if (folio == NULL)
 		return req->wb_page;
 	return folio_page(folio, pgbase >> PAGE_SHIFT);
@@ -223,6 +244,8 @@ static inline size_t nfs_page_max_length(const struct nfs_page *req)
 {
 	struct folio *folio = nfs_page_to_folio(req);
 
+	if (nfs_page_is_dmabuf(req))
+		return req->wb_bytes;
 	if (folio == NULL)
 		return PAGE_SIZE;
 	return folio_size(folio);
