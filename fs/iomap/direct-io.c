@@ -10,6 +10,7 @@
 #include <linux/iomap.h>
 #include <linux/task_io_accounting_ops.h>
 #include <linux/fserror.h>
+#include <linux/dma-buf-io.h>
 #include <linux/init.h>
 #include "internal.h"
 #include "trace.h"
@@ -411,6 +412,14 @@ static inline unsigned int iomap_dio_alignment(struct inode *inode,
 	return bdev_logical_block_size(bdev);
 }
 
+/* the disk behind a file can change after its dma-buf was registered */
+static bool iomap_dio_dmabuf_bdev_ok(const struct iov_iter *iter,
+		struct block_device *bdev)
+{
+	return !iov_iter_is_dmabuf_map(iter) ||
+	       iter->dmabuf_map->ctx->devt == disk_devt(bdev->bd_disk);
+}
+
 static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 {
 	const struct iomap *iomap = &iter->iomap;
@@ -428,6 +437,9 @@ static int iomap_dio_bio_iter(struct iomap_iter *iter, struct iomap_dio *dio)
 	if (iov_iter_is_dmabuf_map(dio->submit.iter) &&
 	    (iomap->flags & IOMAP_F_INTEGRITY))
 		return -EOPNOTSUPP;
+	/* before any zeroing, so a refused write issues no I/O */
+	if (!iomap_dio_dmabuf_bdev_ok(dio->submit.iter, iomap->bdev))
+		return -EXDEV;
 
 	/*
 	 * File systems that write out of place and always allocate new blocks
@@ -1021,6 +1033,11 @@ ssize_t __iomap_dio_read_simple(struct kiocb *iocb, struct iov_iter *iter,
 	    iomi->iomap.offset + iomi->iomap.length < iomi->pos + iomi->len ||
 	    (iomi->iomap.flags & IOMAP_F_INTEGRITY)) {
 		ret = -ENOTBLK;
+		goto out_dio_end;
+	}
+
+	if (!iomap_dio_dmabuf_bdev_ok(iter, iomi->iomap.bdev)) {
+		ret = -EXDEV;
 		goto out_dio_end;
 	}
 

@@ -50,6 +50,9 @@ struct dma_buf_io_ctx {
 
 	void					*dev_priv;
 	const struct dma_buf_io_ops		*dev_ops;
+
+	/* disk the context was initialised for, 0 if none */
+	dev_t					devt;
 };
 
 int dma_buf_io_ctx_create(struct file *file,

@@ -2202,8 +2202,8 @@ xfs_file_mmap_prepare(
 
 /*
  * A realtime file's data lives on the realtime device, anything else on the
- * data device. If a file is switched between them after registration, the
- * block layer cross-device check refuses the I/O.
+ * data device. If a file is switched between them after registration, iomap
+ * refuses the I/O with -EXDEV.
  */
 static int
 xfs_file_init_dma_buf_io_ctx(struct file *file,
