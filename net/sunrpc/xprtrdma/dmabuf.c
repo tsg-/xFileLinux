@@ -192,7 +192,8 @@ int rpcrdma_dmabuf_check(const struct xdr_buf *buf, struct ib_device *device)
  * when they are marshalled.
  *
  * Returns 0 on success, -ENOTCONN if @xprt is not connected, -EOPNOTSUPP
- * for a device without a DMA device, -EINVAL for a dma-buf that is not a
+ * on a kernel whose PAGE_SIZE is not 4 KiB or for a device without a DMA
+ * device, -EINVAL for a dma-buf that is not a
  * multiple of DMA_BUF_IO_PAGE_SIZE or is larger than UINT_MAX, or the
  * error from attaching the dma-buf (-EBUSY when peer-to-peer DMA between
  * the exporter and the device is not possible).
@@ -207,6 +208,12 @@ int xprt_rdma_init_dma_buf_io_ctx(struct rpc_xprt *xprt,
 	struct ib_device *device = NULL;
 	int ret;
 
+	/*
+	 * A dma-buf MR is built from DMA_BUF_IO_PAGE_SIZE pages, but the chunk
+	 * segment budget is sized in PAGE_SIZE pages and would run out first.
+	 */
+	if (PAGE_SIZE != DMA_BUF_IO_PAGE_SIZE)
+		return -EOPNOTSUPP;
 	if (base->dmabuf->size > UINT_MAX ||
 	    !IS_ALIGNED(base->dmabuf->size, DMA_BUF_IO_PAGE_SIZE))
 		return -EINVAL;
