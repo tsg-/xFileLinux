@@ -158,9 +158,9 @@ static const struct dma_buf_io_ops rpcrdma_dmabuf_io_ops = {
  * @buf: xdr_buf carrying a dma-buf payload
  * @device: device the payload is about to be registered on
  *
- * Returns 0, -EOPNOTSUPP if the map was not created by xprtrdma, -EXDEV if
- * its buffer was attached for another device, or -EINVAL if the payload
- * lies outside the buffer.
+ * Returns 0, -EOPNOTSUPP if the map was not created by xprtrdma, -ECANCELED
+ * if it is being invalidated, -EXDEV if its buffer was attached for another
+ * device, or -EINVAL if the payload lies outside the buffer.
  */
 int rpcrdma_dmabuf_check(const struct xdr_buf *buf, struct ib_device *device)
 {
@@ -169,6 +169,9 @@ int rpcrdma_dmabuf_check(const struct xdr_buf *buf, struct ib_device *device)
 
 	if (!base || base->ctx->dev_ops != &rpcrdma_dmabuf_io_ops)
 		return -EOPNOTSUPP;
+	/* its DMA addresses no longer describe the buffer's memory */
+	if (percpu_ref_is_dying(&base->refs))
+		return -ECANCELED;
 	ctx = base->ctx->dev_priv;
 	if (ctx->device != device)
 		return -EXDEV;
