@@ -705,6 +705,9 @@ xprt_rdma_send_request(struct rpc_rqst *rqst)
 	rc = rpcrdma_marshal_req(r_xprt, rqst);
 	if (rc < 0)
 		goto failed_marshal;
+	/* refused: the request's own task has been ended, dequeue it */
+	if (rc > 0)
+		return 0;
 
 	/* Must suppress retransmit to maintain credits */
 	if (rqst->rq_connect_cookie == xprt->connect_cookie)

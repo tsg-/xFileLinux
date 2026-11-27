@@ -879,6 +879,7 @@ void rpc_task_try_cancel(struct rpc_task *task, int error)
 	if (queue)
 		rpc_wake_up_queued_task(queue, task);
 }
+EXPORT_SYMBOL_GPL(rpc_task_try_cancel);
 
 void rpc_exit(struct rpc_task *task, int status)
 {

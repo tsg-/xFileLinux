@@ -846,6 +846,7 @@ static int rpcrdma_marshal_dmabuf(struct rpcrdma_xprt *r_xprt,
  *
  * Returns:
  *	%0 if the RPC was sent successfully,
+ *	%1 if the RPC was refused and its task has been ended,
  *	%-ENOTCONN if the connection was lost,
  *	%-EAGAIN if the caller should call again with the same arguments,
  *	%-ENOBUFS if the caller should call again after a delay,
@@ -892,8 +893,16 @@ rpcrdma_marshal_req(struct rpcrdma_xprt *r_xprt, struct rpc_rqst *rqst)
 	if (xdr_buf_is_dmabuf(&rqst->rq_snd_buf) ||
 	    xdr_buf_is_dmabuf(&rqst->rq_rcv_buf)) {
 		ret = rpcrdma_marshal_dmabuf(r_xprt, rqst, ddp_allowed);
-		if (ret)
+		if (ret) {
+			/*
+			 * xprt_transmit() may be draining the queue for another
+			 * task, which would be handed this error: end the
+			 * request's own task instead.
+			 */
+			rpc_task_try_cancel(rqst->rq_task, ret);
+			ret = 1;
 			goto out_err;
+		}
 	}
 
 	/*
